@@ -1,0 +1,26 @@
+# Build / runtime
+build/
+*.o
+*.a
+*.so
+*.dylib
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Reports / logs
+reports/*.json
+reports/*.log
+audit/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
