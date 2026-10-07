@@ -1,0 +1,3 @@
+[submodule "target/aura-redis"]
+	path = target/aura-redis
+	url = https://github.com/cybrid-systems/aura-redis.git
