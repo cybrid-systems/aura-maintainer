@@ -44,3 +44,16 @@ Early scaffolding. Target: a reproducible 24–72h run against a real mid-sized 
 
 - Aura runtime: https://github.com/cybrid-systems/aura
 - Organization: https://github.com/cybrid-systems
+
+## Quick start (v0 skeleton)
+
+```bash
+# Requires an Aura binary. Set AURA_BIN or place it at a known path.
+export AURA_BIN=/path/to/aura
+
+python3 harness/run.py --cycles 5
+# Logs and audit jsonl land in reports/
+```
+
+The agent currently only has stage stubs. Next steps are to implement
+`discover`, `locate` (via `query:*`), `propose`, and real `mutate:*` + test invocation.

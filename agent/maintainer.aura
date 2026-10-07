@@ -1,0 +1,112 @@
+; maintainer.aura — Long-horizon autonomous code maintenance agent (v0 skeleton)
+;
+; Core loop:
+;   discover → locate → propose → snapshot → mutate → verify → decide (keep|rollback) → record
+;
+; This file is the orchestration entry point. Individual stages live in sibling modules.
+
+(require "std/mutate" all:)
+(require "std/hot-strategy" all:)
+
+; ── configuration ──
+(define *target-root* "target/aura-redis")
+(define *focus-paths*
+  '("src/redis/policy_agent.aura"
+    "src/redis/policy/"
+    "src/redis/adaptive.aura"
+    "src/redis/adaptive_body.aura"
+    "tests/test_adaptive_choose.aura"
+    "tests/test_hot_strategy_policy.aura"))
+
+(define *max-cycles* 100)
+(define *cycle* 0)
+(define *kept* 0)
+(define *rolled-back* 0)
+
+; ── stage stubs (to be filled) ──
+
+(define (discover)
+  ; TODO: scan focus-paths for issues (failing tests, TODOs, complexity, missing coverage)
+  ; Return a list of issue records: ((path . "...") (kind . "todo|test|perf") (summary . "..."))
+  '())
+
+(define (locate issue)
+  ; TODO: use query:* to find precise AST nodes for the issue
+  ; Return node refs or #f
+  #f)
+
+(define (propose issue nodes)
+  ; TODO: generate a candidate mutation (source string or structured edit)
+  ; Return mutation descriptor or #f
+  #f)
+
+(define (verify)
+  ; TODO: run relevant tests / smoke for the target
+  ; Return #t if pass, #f otherwise
+  #t)
+
+(define (record! decision mutation reason)
+  ; TODO: append structured audit entry
+  ; For now just display
+  (display "AUDIT ")
+  (display decision)
+  (display " ")
+  (display reason)
+  (newline))
+
+; ── main cycle ──
+
+(define (run-one-cycle)
+  (set! *cycle* (+ *cycle* 1))
+  (display "=== cycle ")
+  (display *cycle*)
+  (display " ===\n")
+
+  (let ((issues (discover)))
+    (if (null? issues)
+      (begin
+        (display "no issues found\n")
+        #f)
+      (let* ((issue (car issues))
+             (nodes (locate issue))
+             (mutation (propose issue nodes)))
+        (if (not mutation)
+          (begin
+            (display "no proposal\n")
+            #f)
+          (begin
+            ; snapshot before mutate
+            (ast:snapshot "pre-mutate")
+            ; TODO: apply mutation via mutate:*
+            (display "would apply mutation\n")
+            (let ((ok (verify)))
+              (if ok
+                (begin
+                  (set! *kept* (+ *kept* 1))
+                  (record! "KEEP" mutation "tests passed")
+                  #t)
+                (begin
+                  (ast:rollback "pre-mutate")
+                  (set! *rolled-back* (+ *rolled-back* 1))
+                  (record! "ROLLBACK" mutation "tests failed")
+                  #f)))))))))
+
+(define (run)
+  (display "aura-maintainer v0 starting\n")
+  (display "target: ")
+  (display *target-root*)
+  (newline)
+  (let loop ((n 0))
+    (if (or (>= n *max-cycles*) (not (run-one-cycle)))
+      (begin
+        (display "done. cycles=")
+        (display *cycle*)
+        (display " kept=")
+        (display *kept*)
+        (display " rolled-back=")
+        (display *rolled-back*)
+        (newline))
+      (loop (+ n 1)))))
+
+; entry
+(run)
