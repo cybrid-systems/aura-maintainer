@@ -1,0 +1,168 @@
+"""Optional LLM proposer. No network. The default rules path never imports it."""
+
+from __future__ import annotations
+
+import json
+import os
+import tempfile
+import unittest
+from pathlib import Path
+
+from harness.audit import load_audit
+from harness.catalog import call_heads_allowed, grammar_ok, load_catalog
+from harness import run as runmod
+
+AURA = "/home/dev/code/aura/build/aura"
+PREFIX = "(lambda (dgets dsets dhits dmisses devicted nkeys dexpired avg_ttl keys_ttl) "
+
+
+class HeadTests(unittest.TestCase):
+    def test_gold_heads_pass_and_c_func_fails(self) -> None:
+        catalog = load_catalog()
+        self.assertTrue(call_heads_allowed(catalog.normal))
+        self.assertIn("*", catalog.normal)
+        bad = PREFIX + "(c-func \"x\"))"
+        self.assertFalse(grammar_ok(bad))
+        self.assertFalse(call_heads_allowed(bad))
+        display = PREFIX + "(string-append \"a\" \"b\"))"
+        self.assertTrue(grammar_ok(display))
+        self.assertFalse(call_heads_allowed(display))
+
+
+class LlmHarnessTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.reports = Path(self.tmp.name)
+        self._stub = os.environ.pop("AM_LLM_STUB_BODY", None)
+
+    def tearDown(self) -> None:
+        if self._stub is None:
+            os.environ.pop("AM_LLM_STUB_BODY", None)
+        else:
+            os.environ["AM_LLM_STUB_BODY"] = self._stub
+        self.tmp.cleanup()
+
+    def _fake(self, name: str, source: str) -> str:
+        path = Path(self.tmp.name) / name
+        path.write_text(source, encoding="utf-8")
+        path.chmod(0o755)
+        return str(path)
+
+    def test_missing_key_is_idle(self) -> None:
+        log = Path(self.tmp.name) / "spawns.txt"
+        os.environ["AM_SPAWN_LOG"] = str(log)
+        aura = self._fake("see.py", """#!/usr/bin/env python3
+import os
+open(os.environ["AM_SPAWN_LOG"], "a", encoding="utf-8").write("spawned\\n")
+print('CYCLE_JSON {"schema":"aura-maintainer.audit.v1","decision":"KEEP","reason":"no","snapshot_id":null}')
+""")
+        try:
+            rc = runmod.main([
+                "--aura-bin", aura,
+                "--proposer", "llm",
+                "--llm-key", str(Path(self.tmp.name) / "missing-key"),
+                "--cycles", "1",
+                "--reports-dir", str(self.reports),
+                "--run-id", "nokey",
+                "--timeout-sec", "5",
+            ])
+        finally:
+            os.environ.pop("AM_SPAWN_LOG", None)
+        self.assertEqual(rc, 0)
+        self.assertFalse(log.exists())
+        rows = load_audit(self.reports / "nokey" / "audit.jsonl")
+        self.assertEqual(rows[0]["decision"], "IDLE")
+        self.assertEqual(rows[0]["reason"], "proposer-unavailable")
+        self.assertNotEqual(rows[0]["decision"], "KEEP")
+        meta = json.loads((self.reports / "nokey" / "champion.meta.json").read_text(encoding="utf-8"))
+        self.assertEqual(meta["generation"], 0)
+
+    def test_call_head_rejected_without_spawn(self) -> None:
+        secret = "sk-test-secret-value"
+        key = Path(self.tmp.name) / "key"
+        key.write_text(secret + "\n", encoding="utf-8")
+        log = Path(self.tmp.name) / "spawns.txt"
+        os.environ["AM_SPAWN_LOG"] = str(log)
+        os.environ["AM_LLM_STUB_BODY"] = PREFIX + "(string-append \"a\" \"b\"))"
+        aura = self._fake("see.py", """#!/usr/bin/env python3
+import os
+open(os.environ["AM_SPAWN_LOG"], "a", encoding="utf-8").write("spawned\\n")
+print('CYCLE_JSON {"schema":"aura-maintainer.audit.v1","decision":"KEEP","reason":"no","snapshot_id":null}')
+""")
+        before = None
+        try:
+            rc = runmod.main([
+                "--aura-bin", aura,
+                "--proposer", "llm",
+                "--llm-key", str(key),
+                "--cycles", "1",
+                "--reports-dir", str(self.reports),
+                "--run-id", "heads",
+                "--timeout-sec", "5",
+            ])
+            run_dir = self.reports / "heads"
+            before = json.loads((run_dir / "champion.meta.json").read_text(encoding="utf-8"))["body_sha256"]
+            blob = "\n".join(path.read_text(encoding="utf-8", errors="replace") for path in run_dir.rglob("*") if path.is_file())
+        finally:
+            os.environ.pop("AM_SPAWN_LOG", None)
+        self.assertEqual(rc, 0)
+        self.assertFalse(log.exists())
+        rows = load_audit(self.reports / "heads" / "audit.jsonl")
+        self.assertEqual(rows[0]["reason"], "proposal:call-head")
+        self.assertNotEqual(rows[0]["decision"], "KEEP")
+        meta = json.loads((self.reports / "heads" / "champion.meta.json").read_text(encoding="utf-8"))
+        self.assertEqual(meta["body_sha256"], before)
+        self.assertNotIn(secret, blob)
+
+
+@unittest.skipUnless(Path(AURA).is_file(), "aura binary not built")
+class LlmAuraTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.reports = Path(self.tmp.name)
+        self._stub = os.environ.pop("AM_LLM_STUB_BODY", None)
+
+    def tearDown(self) -> None:
+        if self._stub is None:
+            os.environ.pop("AM_LLM_STUB_BODY", None)
+        else:
+            os.environ["AM_LLM_STUB_BODY"] = self._stub
+        self.tmp.cleanup()
+
+    def _run_stub(self, body: str, run_id: str) -> tuple[int, dict, str]:
+        os.environ["AM_LLM_STUB_BODY"] = body
+        rc = runmod.main([
+            "--aura-bin", AURA,
+            "--proposer", "llm",
+            "--llm-key", str(Path(self.tmp.name) / "missing-key"),
+            "--cycles", "1",
+            "--mode", "hold",
+            "--reports-dir", str(self.reports),
+            "--run-id", run_id,
+            "--timeout-sec", "40",
+        ])
+        run_dir = self.reports / run_id
+        meta = json.loads((run_dir / "champion.meta.json").read_text(encoding="utf-8"))
+        rows = load_audit(run_dir / "audit.jsonl")
+        return rc, meta, rows[0]["reason"]
+
+    def test_socket_body_is_grammar_rejected(self) -> None:
+        rc, meta, reason = self._run_stub(PREFIX + "(socket))", "socket")
+        self.assertEqual(rc, 0)
+        self.assertEqual(reason, "proposal:grammar")
+        self.assertEqual(meta["generation"], 0)
+        seed = runmod.sha256_bytes(
+            (self.reports / "socket" / "champion.body").read_text(encoding="utf-8").encode("utf-8")
+        )
+        self.assertEqual(meta["body_sha256"], seed)
+
+    def test_c_func_body_is_rejected(self) -> None:
+        rc, meta, reason = self._run_stub(PREFIX + "(c-func \"x\"))", "cfunc")
+        self.assertEqual(rc, 0)
+        self.assertEqual(reason, "proposal:grammar")
+        self.assertNotEqual(reason, "fixture_score")
+        self.assertEqual(meta["generation"], 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -11,9 +11,9 @@ __pycache__/
 .venv/
 venv/
 
-# Reports / logs
-reports/*.json
-reports/*.log
+# Reports / logs. Keep the directory, ignore run artifacts.
+reports/**
+!reports/.gitkeep
 audit/
 
 # IDE

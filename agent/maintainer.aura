@@ -1,112 +1,461 @@
-; maintainer.aura — Long-horizon autonomous code maintenance agent (v0 skeleton)
+; maintainer.aura — one process, one cycle.
 ;
-; Core loop:
-;   discover → locate → propose → snapshot → mutate → verify → decide (keep|rollback) → record
-;
-; This file is the orchestration entry point. Individual stages live in sibling modules.
+; Seed choose-fn, locate it, optionally rebind one proposal, score the
+; fixture, then KEEP or ast:restore + eval-current. ast:restore does not
+; rebind the live closure; the bare eval-current after it does.
+; Do not call ast:rollback, hot-strategy:swap!, workspace:rollback-to,
+; or workspace:rollback-latest.
 
 (require "std/mutate" all:)
 (require "std/hot-strategy" all:)
 
-; ── configuration ──
-(define *target-root* "target/aura-redis")
-(define *focus-paths*
-  '("src/redis/policy_agent.aura"
-    "src/redis/policy/"
-    "src/redis/adaptive.aura"
-    "src/redis/adaptive_body.aura"
-    "tests/test_adaptive_choose.aura"
-    "tests/test_hot_strategy_policy.aura"))
+; eval-current re-enters this file. The gate has to sit above the cycle
+; state: a nested load that redefined *req* would wipe the outer cycle.
+(define (file-busy?)
+  (let ((p (getenv "AM_REENTRY_FLAG")))
+    (and (string? p)
+         (let ((t (try (read-file p) (catch (e) ""))))
+           (and (string? t)
+                (>= (string-length t) 4)
+                (string=? (substring t 0 4) "busy"))))))
 
-(define *max-cycles* 100)
-(define *cycle* 0)
-(define *kept* 0)
-(define *rolled-back* 0)
+(if (file-busy?)
+  #t
+  (begin
 
-; ── stage stubs (to be filled) ──
+(define *stub*
+  "(define (choose-fn dgets dsets dhits dmisses devicted nkeys dexpired avg_ttl keys_ttl) \"\")")
+(define *prefix*
+  "(lambda (dgets dsets dhits dmisses devicted nkeys dexpired avg_ttl keys_ttl)")
+(define *deny*
+  '("ffi" "socket" "c-func" "read-file" "write-file" "getenv" "syscall" "plugin" ".so"))
 
-(define (discover)
-  ; TODO: scan focus-paths for issues (failing tests, TODOs, complexity, missing coverage)
-  ; Return a list of issue records: ((path . "...") (kind . "todo|test|perf") (summary . "..."))
-  '())
+(define *req* #f)
+(define *fixtures* '())
+(define *proposal* #f)
 
-(define (locate issue)
-  ; TODO: use query:* to find precise AST nodes for the issue
-  ; Return node refs or #f
-  #f)
+(define (starts-with? s pre)
+  (and (string? s)
+       (string? pre)
+       (>= (string-length s) (string-length pre))
+       (string=? (substring s 0 (string-length pre)) pre)))
 
-(define (propose issue nodes)
-  ; TODO: generate a candidate mutation (source string or structured edit)
-  ; Return mutation descriptor or #f
-  #f)
+(define (contains? s pat)
+  (let ((n (string-length s)) (m (string-length pat)))
+    (let loop ((i 0))
+      (if (> (+ i m) n)
+        #f
+        (if (string=? (substring s i (+ i m)) pat)
+          #t
+          (loop (+ i 1)))))))
 
-(define (verify)
-  ; TODO: run relevant tests / smoke for the target
-  ; Return #t if pass, #f otherwise
-  #t)
+(define (deny? s)
+  (let loop ((ps *deny*))
+    (if (null? ps)
+      #f
+      (if (contains? s (car ps))
+        #t
+        (loop (cdr ps))))))
 
-(define (record! decision mutation reason)
-  ; TODO: append structured audit entry
-  ; For now just display
-  (display "AUDIT ")
-  (display decision)
-  (display " ")
-  (display reason)
-  (newline))
+(define (balanced? s)
+  (let loop ((i 0) (depth 0) (in-str #f))
+    (if (>= i (string-length s))
+      (and (= depth 0) (not in-str))
+      (let ((c (string-ref s i)))
+        (cond
+          (in-str
+            (if (= c 92)
+              (loop (+ i 2) depth #t)
+              (if (= c 34)
+                (loop (+ i 1) depth #f)
+                (loop (+ i 1) depth #t))))
+          ((= c 34) (loop (+ i 1) depth #t))
+          ((= c 40) (loop (+ i 1) (+ depth 1) #f))
+          ((= c 41)
+            (if (< depth 1)
+              #f
+              (loop (+ i 1) (- depth 1) #f)))
+          (else (loop (+ i 1) depth #f)))))))
 
-; ── main cycle ──
+(define (grammar-ok? body proposal-id keep-el broken-body)
+  (and (string? body)
+       (> (string-length body) 0)
+       (<= (string-length body) 4096)
+       (not (deny? body))
+       (balanced? body)
+       (or (and (string? proposal-id)
+                (string=? proposal-id "probe:broken")
+                (not keep-el)
+                (string? broken-body)
+                (> (string-length broken-body) 0)
+                (string=? body broken-body))
+           (starts-with? body *prefix*))))
 
-(define (run-one-cycle)
-  (set! *cycle* (+ *cycle* 1))
-  (display "=== cycle ")
-  (display *cycle*)
-  (display " ===\n")
+(define (nth lst i)
+  (if (= i 0)
+    (car lst)
+    (nth (cdr lst) (- i 1))))
 
-  (let ((issues (discover)))
-    (if (null? issues)
-      (begin
-        (display "no issues found\n")
+(define (has-num? lst n)
+  (if (or (null? lst) (not (pair? lst)))
+    #f
+    (if (and (number? (car lst)) (= (car lst) n))
+      #t
+      (has-num? (cdr lst) n))))
+
+(define (locate)
+  (let ((nid (try (workspace:find-define "choose-fn") (catch (e) #f)))
+        (defs (try (query:defines "choose-fn") (catch (e) '()))))
+    (if (and (number? nid) (>= nid 0) (has-num? defs nid))
+      (hash "binding" "choose-fn"
+            "node_id" nid
+            "query" "workspace:find-define"
+            "defines_agree" #t
+            "status" "hit")
+      #f)))
+
+(define (row-call row)
+  (let ((args (hash-ref row "args")))
+    (try
+      (let ((v (choose-fn (nth args 0) (nth args 1) (nth args 2)
+                          (nth args 3) (nth args 4) (nth args 5)
+                          (nth args 6) (nth args 7) (nth args 8))))
+        (if (string? v) v "non-string"))
+      (catch (e) "throw"))))
+
+(define (tally)
+  (let loop ((rs *fixtures*) (score 0) (out '()))
+    (if (null? rs)
+      (hash "score" score "rows" out)
+      (let* ((row (car rs))
+             (got (row-call row))
+             (expect (hash-ref row "expect" ""))
+             (weight (hash-ref row "weight" 1))
+             (packed (hash "id" (hash-ref row "id" "")
+                           "got" got
+                           "expect" expect
+                           "weight" weight)))
+        (loop (cdr rs)
+              (if (string=? got expect) (+ score weight) score)
+              (append out (list packed)))))))
+
+(define (find-row rows id)
+  (cond
+    ((null? rows) #f)
+    ((string=? (hash-ref (car rows) "id" "") id) (car rows))
+    (else (find-row (cdr rows) id))))
+
+(define (rows-same? a b)
+  (cond
+    ((and (null? a) (null? b)) #t)
+    ((or (null? a) (null? b)) #f)
+    ((string=? (hash-ref (car a) "got" "") (hash-ref (car b) "got" ""))
+     (rows-same? (cdr a) (cdr b)))
+    (else #f)))
+
+(define (any-bad? rows)
+  (cond
+    ((null? rows) #f)
+    ((or (string=? (hash-ref (car rows) "got" "") "throw")
+         (string=? (hash-ref (car rows) "got" "") "non-string"))
+     #t)
+    (else (any-bad? (cdr rows)))))
+
+(define (all-bad? rows)
+  (cond
+    ((null? rows) #t)
+    ((or (string=? (hash-ref (car rows) "got" "") "throw")
+         (string=? (hash-ref (car rows) "got" "") "non-string"))
+     (all-bad? (cdr rows)))
+    (else #f)))
+
+(define (soft-regressed? base trial)
+  (let ((b (find-row (hash-ref base "rows") "soft22"))
+        (t (find-row (hash-ref trial "rows") "soft22")))
+    (and b t
+         (string=? (hash-ref b "got" "") (hash-ref b "expect" ""))
+         (not (string=? (hash-ref t "got" "") (hash-ref t "expect" ""))))))
+
+(define (proposal-id)
+  (if (hash? *proposal*)
+    (hash-ref *proposal* "id" "")
+    ""))
+
+(define (keep-el?)
+  (and (hash? *proposal*) (hash-ref *proposal* "keep_eligible" #f)))
+
+(define (broken-control)
+  (let ((c (hash-ref *req* "controls" #f)))
+    (if (hash? c) (hash-ref c "broken_body" "") "")))
+
+(define (dry-run?)
+  (let ((v (getenv "AM_DRY_RUN")))
+    (and (string? v) (string=? v "1"))))
+
+(define (epoch-now)
+  (try
+    (let ((n (stats:get "compile:epoch")))
+      (if (number? n) n -1))
+    (catch (e) -1)))
+
+(define (read-prov)
+  (try
+    (let ((p (query:last-mutation-provenance)))
+      (if (hash? p)
+        (let ((mid (hash-ref p "mutation_id" #f)))
+          (hash "mutation_id" (if (number? mid) mid (hash-ref p "mutation-id" 0))
+                "author_fingerprint" (hash-ref p "author-fingerprint" (void))
+                "parent_mutation_id" (hash-ref p "parent-mutation-id" (void))
+                "target_node" (hash-ref p "target-node" (void))
+                "schema" 1914))
+        (hash "mutation_id" 0 "schema" 1914)))
+    (catch (e) (hash "mutation_id" 0 "schema" 1914))))
+
+(define (finish decision reason outcome locator snap prov delta warnings tests)
+  (hash
+    "schema" "aura-maintainer.audit.v1"
+    "run_id" (hash-ref *req* "run_id" "")
+    "cycle_id" (hash-ref *req* "cycle_id" 0)
+    "decision" decision
+    "reason" reason
+    "outcome_class" outcome
+    "author" "aura-maintainer"
+    "proposal_id" (let ((pid (proposal-id))) (if (string=? pid "") (void) pid))
+    "keep_eligible" (if (keep-el?) #t #f)
+    "locator" (if (hash? locator) locator (hash "status" "miss" "binding" "choose-fn"))
+    "snapshot_id" snap
+    "parent_snapshot_id" snap
+    "operator" "mutate:rebind"
+    "compile_epoch_delta" delta
+    "provenance" prov
+    "tests" tests
+    "warnings" warnings))
+
+(define (empty-prov) (hash "mutation_id" 0 "schema" 1914))
+
+(define (do-restore snap pid baseline-rows)
+  (let ((ok (try (ast:restore snap) (catch (e) #f))))
+    (if (not (equal? ok #t))
+      (if (string=? pid "probe:broken")
+        (try (hot-strategy:heal!) (catch (e) #f))
         #f)
-      (let* ((issue (car issues))
-             (nodes (locate issue))
-             (mutation (propose issue nodes)))
-        (if (not mutation)
-          (begin
-            (display "no proposal\n")
-            #f)
-          (begin
-            ; snapshot before mutate
-            (ast:snapshot "pre-mutate")
-            ; TODO: apply mutation via mutate:*
-            (display "would apply mutation\n")
-            (let ((ok (verify)))
-              (if ok
-                (begin
-                  (set! *kept* (+ *kept* 1))
-                  (record! "KEEP" mutation "tests passed")
-                  #t)
-                (begin
-                  (ast:rollback "pre-mutate")
-                  (set! *rolled-back* (+ *rolled-back* 1))
-                  (record! "ROLLBACK" mutation "tests failed")
-                  #f)))))))))
+      #f)
+    (let ((ev (try (begin (eval-current) #t) (catch (e) #f))))
+      (if (not (equal? ev #t))
+        "eval-failed"
+        (let ((after (tally)))
+          (if (rows-same? baseline-rows (hash-ref after "rows"))
+            after
+            "mismatch"))))))
 
-(define (run)
-  (display "aura-maintainer v0 starting\n")
-  (display "target: ")
-  (display *target-root*)
-  (newline)
-  (let loop ((n 0))
-    (if (or (>= n *max-cycles*) (not (run-one-cycle)))
+(define (broken-rejected loc snap base)
+  ; This runtime's rebind typecheck refuses the unbound call, so the bad
+  ; body is not installed. The probe is OK only when the live closure is
+  ; still the champion we scored before the attempt.
+  (let* ((now (tally))
+         (tests (list (hash "name" "fixture"
+                            "baseline_score" (hash-ref base "score")
+                            "trial_score" (hash-ref now "score")
+                            "baseline_rows" (hash-ref base "rows")
+                            "trial_rows" (hash-ref now "rows")))))
+    (if (rows-same? (hash-ref base "rows") (hash-ref now "rows"))
+      (with-restore "PROBE_OK" "broken-rejected" "probe" loc snap
+                    (empty-prov) 0 '() tests "probe:broken" base)
+      (finish "PATH_BROKEN" "broken-reject-leaked" "path-broken" loc snap
+              (empty-prov) 0 '() tests))))
+
+(define (apply-proposal loc)
+  (let* ((pid (proposal-id))
+         (body (hash-ref *proposal* "body" ""))
+         (base (tally))
+         (snap (ast:snapshot (string-append "cycle-"
+                              (number->string (hash-ref *req* "cycle_id" 0))
+                              "-pre"))))
+    (if (or (not (number? snap)) (< snap 0))
+      (finish "PATH_BROKEN" "snapshot-failed" "path-broken" loc (void)
+              (empty-prov) 0 '() '())
+      (let ((epoch0 (epoch-now)))
+        (let ((rebound (mutate:rebind "choose-fn" body pid)))
+          (if (not (equal? rebound #t))
+            (begin
+              (display "REBIND ")
+              (display rebound)
+              (newline)
+              (if (string=? pid "probe:broken")
+                (broken-rejected loc snap base)
+                (finish "PATH_BROKEN" "proposal-rebind" "path-broken" loc snap
+                        (empty-prov) 0 '() '())))
+            (let ((ev (try (begin (eval-current) #t) (catch (e) #f))))
+              (if (not ev)
+                (finish "PATH_BROKEN" "proposal-eval" "path-broken" loc snap
+                        (empty-prov) 0 '() '())
+                (let ((loc2 (locate)))
+                  (if (not loc2)
+                    (finish "PATH_BROKEN" "locate-miss-after-mutate" "path-broken" loc snap
+                            (read-prov) 0 '() '())
+                    (let* ((epoch1 (epoch-now))
+                           (delta (if (and (>= epoch0 0) (>= epoch1 0)) (- epoch1 epoch0) 0))
+                           (warnings (if (= delta 0) '("epoch-not-bumped") '()))
+                           (prov (read-prov))
+                           (trial (tally))
+                           (keep (keep-el?))
+                           (bscore (hash-ref base "score"))
+                           (tscore (hash-ref trial "score"))
+                           (tests (list (hash "name" "fixture"
+                                              "baseline_score" bscore
+                                              "trial_score" tscore
+                                              "baseline_rows" (hash-ref base "rows")
+                                              "trial_rows" (hash-ref trial "rows")))))
+                      (decide loc2 snap prov delta warnings tests pid base trial keep))))))))))))
+
+(define (with-restore decision reason outcome loc snap prov delta warnings tests pid base)
+  (let ((restored (do-restore snap pid (hash-ref base "rows"))))
+    (cond
+      ((and (string? restored) (string=? restored "eval-failed"))
+       (finish "PATH_BROKEN" "restore-eval-failed" "path-broken" loc snap prov delta warnings tests))
+      ((and (string? restored) (string=? restored "mismatch"))
+       (finish "PATH_BROKEN" "restore-mismatch" "path-broken" loc snap prov delta warnings tests))
+      ((hash? restored)
+       (let ((tests2 (list (hash "name" "fixture"
+                                 "baseline_score" (hash-ref base "score")
+                                 "trial_score" (hash-ref (car tests) "trial_score")
+                                 "baseline_rows" (hash-ref base "rows")
+                                 "trial_rows" (hash-ref (car tests) "trial_rows")
+                                 "restored_rows" (hash-ref restored "rows")))))
+         (finish decision reason outcome loc snap prov delta warnings tests2)))
+      (else
+       (finish "PATH_BROKEN" "restore-eval-failed" "path-broken" loc snap prov delta warnings tests)))))
+
+(define (decide loc snap prov delta warnings tests pid base trial keep)
+  (let ((bscore (hash-ref base "score"))
+        (tscore (hash-ref trial "score"))
+        (brows (hash-ref base "rows"))
+        (trows (hash-ref trial "rows")))
+    (cond
+      ((string=? pid "probe:inverted")
+       (let* ((w (find-row trows "w110"))
+              (r (find-row trows "read"))
+              (ok (and w r
+                       (starts-with? (hash-ref w "got" "") "lru")
+                       (string=? (hash-ref r "got" "") "lfu|hot_cold"))))
+         (with-restore (if ok "PROBE_OK" "PROBE_FAIL")
+                       (if ok "inverted-absolute" "inverted-miss")
+                       "probe" loc snap prov delta warnings tests pid base)))
+      ((string=? pid "probe:broken")
+       (let ((ok (all-bad? trows)))
+         (with-restore (if ok "PROBE_OK" "PROBE_FAIL")
+                       (if ok "broken-threw" "broken-returned-string")
+                       "probe" loc snap prov delta warnings tests pid base)))
+      ((and keep (any-bad? trows))
+       (with-restore "ROLLBACK" "proposal:contract-throw" "rejection"
+                     loc snap prov delta warnings tests pid base))
+      ((and keep (soft-regressed? base trial))
+       (with-restore "ROLLBACK" "proposal:soft-regressed" "rejection"
+                     loc snap prov delta warnings tests pid base))
+      ((and keep (> tscore bscore))
+       (if (and (number? (hash-ref prov "mutation_id" 0))
+                (> (hash-ref prov "mutation_id" 0) 0))
+         (finish "KEEP" (string-append "fixture_score "
+                          (number->string bscore) "->" (number->string tscore))
+                 "improvement" loc snap prov delta warnings tests)
+         (finish "PATH_BROKEN" "provenance-missing" "path-broken"
+                 loc snap prov delta warnings tests)))
+      ((< tscore bscore)
+       (with-restore "ROLLBACK" "proposal:score-drop"
+                     (if keep "improvement" "rejection")
+                     loc snap prov delta warnings tests pid base))
+      (else
+       (with-restore "ROLLBACK" "proposal:no-improvement"
+                     (if keep "improvement" "rejection")
+                     loc snap prov delta warnings tests pid base)))))
+
+(define (after-seed loc)
+  (cond
+    ((not (hash? *proposal*))
+     (finish "IDLE" "locate-ok" "idle" loc (void) (empty-prov) 0 '() '()))
+    ((dry-run?)
+     (finish "ROLLBACK" "proposal:dry-run" "rejection" loc (void) (empty-prov) 0 '() '()))
+    ((not (mutate:boundary-safe?))
+     (finish "PATH_BROKEN" "boundary-not-safe" "path-broken" loc (void) (empty-prov) 0 '() '()))
+    ((not (grammar-ok? (hash-ref *proposal* "body" "")
+                       (proposal-id)
+                       (keep-el?)
+                       (broken-control)))
+     (finish "ROLLBACK" "proposal:grammar" "rejection" loc (void) (empty-prov) 0 '() '()))
+    (else (apply-proposal loc))))
+
+(define (seed-champion champ)
+  (set-code *stub*)
+  (eval-current)
+  (let ((ok (mutate:rebind "choose-fn" champ "seed-champion")))
+    (if (not (equal? ok #t))
+      (finish "PATH_BROKEN" "seed-rebind" "path-broken" #f (void) (empty-prov) 0 '() '())
+      (let ((ev (try (begin (eval-current) #t) (catch (e) #f))))
+        (if (not ev)
+          (finish "PATH_BROKEN" "seed-eval" "path-broken" #f (void) (empty-prov) 0 '() '())
+          (let ((loc (locate)))
+            (if (not loc)
+              (finish "PATH_BROKEN" "locate-miss-before-mutate" "path-broken"
+                      #f (void) (empty-prov) 0 '() '())
+              (begin
+                (try (hot-strategy:register! "choose-fn" champ) (catch (e) #f))
+                (after-seed loc)))))))))
+
+(define (cycle-inner)
+  (let* ((path (getenv "AM_REQUEST"))
+         (raw (if (string? path) (try (read-file path) (catch (e) "")) ""))
+         (req (try (json-parse raw) (catch (e) #f))))
+    (if (not (hash? req))
+      (hash "schema" "aura-maintainer.audit.v1"
+            "decision" "PATH_BROKEN"
+            "reason" "bad-json"
+            "outcome_class" "path-broken"
+            "author" "aura-maintainer"
+            "snapshot_id" (void))
       (begin
-        (display "done. cycles=")
-        (display *cycle*)
-        (display " kept=")
-        (display *kept*)
-        (display " rolled-back=")
-        (display *rolled-back*)
-        (newline))
-      (loop (+ n 1)))))
+        (set! *req* req)
+        (set! *fixtures* (hash-ref req "fixtures" '()))
+        (set! *proposal* (hash-ref req "proposal" #f))
+        (let ((champ (hash-ref req "champion_body" "")))
+          (if (not (grammar-ok? champ "" #t ""))
+            (finish "ROLLBACK" "proposal:grammar" "rejection" #f (void) (empty-prov) 0 '() '())
+            (seed-champion champ)))))))
 
-; entry
-(run)
+(define (raw-nl? s)
+  (let loop ((i 0) (n (string-length s)))
+    (if (>= i n)
+      #f
+      (if (= (string-ref s i) 10)
+        #t
+        (loop (+ i 1) n)))))
+
+(define (emit rec)
+  (let ((encoded (json-encode rec)))
+    (if (raw-nl? encoded)
+      (begin
+        (display "CYCLE_JSON {\"schema\":\"aura-maintainer.audit.v1\",\"decision\":\"PATH_BROKEN\",\"reason\":\"json-multiline\",\"snapshot_id\":null}")
+        (newline))
+      (begin
+        (display "CYCLE_JSON ")
+        (display encoded)
+        (newline)))))
+
+(define (arm-reentry)
+  (let ((p (getenv "AM_REENTRY_FLAG")))
+    (if (string? p)
+      (try (write-file p "busy\n") (catch (e) #f))
+      #f)))
+
+(arm-reentry)
+(emit (try (cycle-inner) (catch (e)
+  (begin
+    (display "AGENT_CRASH ")
+    (display e)
+    (newline)
+    (hash "schema" "aura-maintainer.audit.v1"
+          "decision" "PATH_BROKEN"
+          "reason" "crash-internal"
+          "outcome_class" "path-broken"
+          "author" "aura-maintainer"
+          "snapshot_id" (void))))))
+))

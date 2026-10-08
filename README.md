@@ -48,12 +48,15 @@ Early scaffolding. Target: a reproducible 24–72h run against a real mid-sized 
 ## Quick start (v0 skeleton)
 
 ```bash
-# Requires an Aura binary. Set AURA_BIN or place it at a known path.
+# Requires an Aura binary. Set AURA_BIN or pass --aura-bin.
 export AURA_BIN=/path/to/aura
 
-python3 harness/run.py --cycles 5
-# Logs and audit jsonl land in reports/
+python3 harness/run.py --cycles 2 --mode hold
+# reports/<run-id>/audit.jsonl is the audit. One Aura process per cycle.
 ```
 
-The agent currently only has stage stubs. Next steps are to implement
-`discover`, `locate` (via `query:*`), `propose`, and real `mutate:*` + test invocation.
+The spec is `docs/design.md`. Each cycle locates `choose-fn`, applies one
+closed-catalog proposal, and keeps it only when the fixture score rises.
+`--dry-run` rolls the proposal back without rebinding it. `--proposer llm`
+is optional and off by default. Soak (`--hours` with `--cycles 0`) is off
+unless you ask for it.
