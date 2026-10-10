@@ -233,12 +233,21 @@ def _parse_form(body: str, i: int) -> tuple[object, int]:
                 break
             if body[i] == ")":
                 return items, i + 1
-            item, i = _parse_form(body, i)
+            item, nxt = _parse_form(body, i)
+            # A delimiter such as a bare quote used to return the same index.
+            # The list loop would then append forever.
+            if nxt <= i:
+                items.append(body[i])
+                i += 1
+                continue
             items.append(item)
+            i = nxt
         return items, i
     j = i
     while j < n and body[j] not in " \t\r\n()\":'":
         j += 1
+    if j == i:
+        return body[i], i + 1
     return body[i:j], j
 
 

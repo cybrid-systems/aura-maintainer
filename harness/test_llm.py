@@ -11,6 +11,7 @@ from pathlib import Path
 from harness.audit import load_audit
 from harness.catalog import call_heads_allowed, grammar_ok, load_catalog
 from harness import run as runmod
+from harness.proposers import llm as llm_mod
 
 AURA = "/home/dev/code/aura/build/aura"
 PREFIX = "(lambda (dgets dsets dhits dmisses devicted nkeys dexpired avg_ttl keys_ttl) "
@@ -27,6 +28,11 @@ class HeadTests(unittest.TestCase):
         display = PREFIX + "(string-append \"a\" \"b\"))"
         self.assertTrue(grammar_ok(display))
         self.assertFalse(call_heads_allowed(display))
+
+    def test_bare_quote_does_not_loop(self) -> None:
+        from harness.catalog import call_heads
+        self.assertEqual(call_heads("(choose 'lfu|flat)"), ["choose"])
+        self.assertEqual(call_heads("(choose \\x)"), ["choose"])
 
 
 class LlmHarnessTests(unittest.TestCase):
@@ -162,6 +168,23 @@ class LlmAuraTests(unittest.TestCase):
         self.assertEqual(reason, "proposal:grammar")
         self.assertNotEqual(reason, "fixture_score")
         self.assertEqual(meta["generation"], 0)
+
+
+class _Chunks:
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+        self._i = 0
+
+    def read(self, n: int) -> bytes:
+        chunk = self._data[self._i : self._i + n]
+        self._i += len(chunk)
+        return chunk
+
+
+class ReadLimitTests(unittest.TestCase):
+    def test_short_body_is_kept_and_long_body_is_refused(self) -> None:
+        self.assertEqual(llm_mod._read_limited(_Chunks(b"abc"), 3), b"abc")
+        self.assertIsNone(llm_mod._read_limited(_Chunks(b"abcd"), 3))
 
 
 if __name__ == "__main__":

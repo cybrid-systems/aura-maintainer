@@ -17,6 +17,8 @@ BASE_URL = "https://api.minimaxi.com/v1"
 CHAT_URL = BASE_URL + "/chat/completions"
 DEFAULT_KEY_FILE = Path.home() / "code" / "keys" / "minimax"
 TIMEOUT_SEC = 30.0
+# A choose-fn body is at most 4096 bytes. Anything larger is not a proposal.
+MAX_RESPONSE_BYTES = 1_000_000
 
 _SYSTEM = (
     "Return only one Aura lambda expression for choose-fn. "
@@ -86,7 +88,10 @@ def _chat(key: str, timeout: float) -> str | None:
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
+            raw = _read_limited(resp, MAX_RESPONSE_BYTES)
+        if raw is None:
+            return None
+        payload = json.loads(raw.decode("utf-8"))
     except Exception:
         return None
     try:
@@ -96,6 +101,20 @@ def _chat(key: str, timeout: float) -> str | None:
     if not isinstance(content, str):
         return None
     return content
+
+
+def _read_limited(resp, limit: int) -> bytes | None:
+    """Read up to ``limit`` bytes. A longer body is refused, not parsed."""
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        block = resp.read(min(65536, limit - total + 1))
+        if not block:
+            return b"".join(chunks)
+        total += len(block)
+        if total > limit:
+            return None
+        chunks.append(block)
 
 
 def _extract_lambda(text: str) -> str | None:
