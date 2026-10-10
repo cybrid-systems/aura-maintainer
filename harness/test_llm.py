@@ -226,6 +226,29 @@ class _Chunks:
         return chunk
 
 
+class KeepMetaTests(unittest.TestCase):
+    def test_llm_keep_drops_template_params(self) -> None:
+        meta = {
+            "generation": 1,
+            "family": "template",
+            "profile": "template",
+            "params": {"min-ops": 120, "miss-pin": 55, "soft-budget": 25},
+        }
+        after, generation = runmod._keep_after(
+            meta, {"kind": "llm"}, "a" * 64,
+        )
+        self.assertEqual(generation, 2)
+        self.assertEqual(after["family"], "llm")
+        self.assertEqual(after["profile"], "llm")
+        self.assertEqual(after["params"], {})
+        self.assertEqual(after["body_sha256"], "a" * 64)
+        param_after, _gen = runmod._keep_after(
+            meta, {"kind": "param", "params": {"min-ops": 80, "miss-pin": 55, "soft-budget": 25}}, "b" * 64,
+        )
+        self.assertEqual(param_after["family"], "template")
+        self.assertEqual(param_after["params"]["min-ops"], 80)
+
+
 class PromptTests(unittest.TestCase):
     def test_request_names_returns_and_champion(self) -> None:
         champion = '(lambda (dgets dsets dhits dmisses devicted nkeys dexpired avg_ttl keys_ttl) "")'

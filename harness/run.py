@@ -553,6 +553,14 @@ def _keep_after(meta: dict, proposal: dict, digest: str) -> tuple[dict, int]:
             "params": dict(params),
             "body_sha256": digest,
         }, generation
+    if kind == "llm":
+        # The body is no longer the template the knobs describe.
+        return {
+            "family": "llm",
+            "profile": "llm",
+            "params": {},
+            "body_sha256": digest,
+        }, generation
     params = meta.get("params") if isinstance(meta.get("params"), dict) else {}
     return {
         "family": meta.get("family"),
