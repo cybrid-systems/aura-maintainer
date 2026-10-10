@@ -843,10 +843,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.proposer == "llm":
             assert llm_mod is not None
             stub = os.environ.get("AM_LLM_STUB_BODY") if "AM_LLM_STUB_BODY" in os.environ else None
-            produced = llm_mod.propose_body(key_file=args.llm_key, stub=stub)
+            produced, why = llm_mod.propose_body(
+                key_file=args.llm_key, stub=stub, champion_body=body,
+            )
             if produced is None:
                 proposal = None
-                record = idle_record(run_id, cycle_id, "proposer-unavailable")
+                record = idle_record(run_id, cycle_id, why)
                 record, streak, stopped_early = _finish_cycle(
                     run_dir, run_id, record, None, meta, tried, catalog, beats, streak,
                 )

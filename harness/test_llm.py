@@ -83,6 +83,34 @@ print('CYCLE_JSON {"schema":"aura-maintainer.audit.v1","decision":"KEEP","reason
         meta = json.loads((self.reports / "nokey" / "champion.meta.json").read_text(encoding="utf-8"))
         self.assertEqual(meta["generation"], 0)
 
+    def test_reply_without_lambda_does_not_spawn(self) -> None:
+        log = Path(self.tmp.name) / "spawns.txt"
+        os.environ["AM_SPAWN_LOG"] = str(log)
+        os.environ["AM_LLM_STUB_BODY"] = "lambda dgets dsets dhits dmisses: 1"
+        aura = self._fake("see.py", """#!/usr/bin/env python3
+import os
+open(os.environ["AM_SPAWN_LOG"], "a", encoding="utf-8").write("spawned\\n")
+print('CYCLE_JSON {"schema":"aura-maintainer.audit.v1","decision":"KEEP","reason":"no","snapshot_id":null}')
+""")
+        try:
+            rc = runmod.main([
+                "--aura-bin", aura,
+                "--proposer", "llm",
+                "--llm-key", str(Path(self.tmp.name) / "missing-key"),
+                "--cycles", "1",
+                "--reports-dir", str(self.reports),
+                "--run-id", "nolambda",
+                "--timeout-sec", "5",
+            ])
+        finally:
+            os.environ.pop("AM_SPAWN_LOG", None)
+            os.environ.pop("AM_LLM_STUB_BODY", None)
+        self.assertEqual(rc, 0)
+        self.assertFalse(log.exists())
+        rows = load_audit(self.reports / "nolambda" / "audit.jsonl")
+        self.assertEqual(rows[0]["decision"], "IDLE")
+        self.assertEqual(rows[0]["reason"], "proposer-no-lambda")
+
     def test_call_head_rejected_without_spawn(self) -> None:
         secret = "sk-test-secret-value"
         key = Path(self.tmp.name) / "key"
@@ -179,6 +207,32 @@ class _Chunks:
         chunk = self._data[self._i : self._i + n]
         self._i += len(chunk)
         return chunk
+
+
+class PromptTests(unittest.TestCase):
+    def test_request_names_returns_and_champion(self) -> None:
+        champion = '(lambda (dgets dsets dhits dmisses devicted nkeys dexpired avg_ttl keys_ttl) "")'
+        text = llm_mod.user_message(champion)
+        for item in (
+            '""',
+            '"lfu|flat|pin"',
+            '"lru|flat"',
+            '"lru|flat|soft"',
+            '"ttl_aware|flat"',
+            '"lfu|hot_cold"',
+            champion,
+        ):
+            self.assertIn(item, text)
+        self.assertIn("lfu|hot_cold", llm_mod._SYSTEM)
+        body, why = llm_mod.propose_body(stub="lambda dgets: 1")
+        self.assertIsNone(body)
+        self.assertEqual(why, "proposer-no-lambda")
+        body, why = llm_mod.propose_body(stub="  ")
+        self.assertIsNone(body)
+        self.assertEqual(why, "proposer-unavailable")
+        body, why = llm_mod.propose_body(stub=champion)
+        self.assertEqual(body, champion)
+        self.assertEqual(why, "")
 
 
 class ReadLimitTests(unittest.TestCase):

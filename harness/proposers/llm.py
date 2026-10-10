@@ -2,8 +2,9 @@
 
 Imported only by ``--proposer llm``. Reads ``~/code/keys/minimax`` at call
 time. The key is never written to the environment, the audit, or a log.
-A missing key, a timeout, or a non-string reply returns None. The caller
-turns that into IDLE ``proposer-unavailable``.
+A missing key, a timeout, or a non-string reply is ``proposer-unavailable``.
+A reply that contains no ``(lambda`` form is ``proposer-no-lambda``.
+Neither of those starts Aura.
 """
 
 from __future__ import annotations
@@ -20,12 +21,35 @@ TIMEOUT_SEC = 30.0
 # A choose-fn body is at most 4096 bytes. Anything larger is not a proposal.
 MAX_RESPONSE_BYTES = 1_000_000
 
+_RETURNS = (
+    '""',
+    '"lfu|flat|pin"',
+    '"lru|flat"',
+    '"lru|flat|soft"',
+    '"ttl_aware|flat"',
+    '"lfu|hot_cold"',
+)
+
 _SYSTEM = (
     "Return only one Aura lambda expression for choose-fn. "
     "The parameter list is exactly "
     "(dgets dsets dhits dmisses devicted nkeys dexpired avg_ttl keys_ttl). "
-    "No prose, no markdown fence."
+    "Every branch returns one of these strings and nothing else: "
+    + ", ".join(_RETURNS)
+    + ". No prose, no markdown fence."
 )
+
+
+def user_message(champion_body: str) -> str:
+    """Ask for one edit of the live champion, with the string contract."""
+    returns = ", ".join(_RETURNS)
+    return (
+        "Edit the current choose-fn. Return one Aura lambda and nothing else. "
+        "Every branch must return one of these strings: "
+        f"{returns}. Do not return a number.\n"
+        "Current body:\n"
+        f"{champion_body}"
+    )
 
 
 def propose_body(
@@ -33,25 +57,25 @@ def propose_body(
     key_file: Path | None = None,
     stub: str | None = None,
     timeout: float = TIMEOUT_SEC,
-) -> str | None:
-    """Return a candidate body, or None when the proposer cannot answer.
+    champion_body: str = "",
+) -> tuple[str | None, str]:
+    """Return ``(body, reason)``. ``reason`` is empty when ``body`` is set.
 
     ``stub`` is a test double. When it is set, the key file is not read and
     the network is not called.
     """
     if stub is not None:
-        text = stub.strip()
-        return text or None
+        return _classify(stub)
     path = key_file or DEFAULT_KEY_FILE
     if not path.is_file():
-        return None
+        return None, "proposer-unavailable"
     key = _read_key(path)
     if not key:
-        return None
-    content = _chat(key, timeout)
+        return None, "proposer-unavailable"
+    content = _chat(key, timeout, champion_body)
     if not content:
-        return None
-    return _extract_lambda(content)
+        return None, "proposer-unavailable"
+    return _classify(content)
 
 
 def _read_key(path: Path) -> str:
@@ -65,12 +89,21 @@ def _read_key(path: Path) -> str:
     return line[0].strip()
 
 
-def _chat(key: str, timeout: float) -> str | None:
+def _classify(text: str) -> tuple[str | None, str]:
+    body = _extract_lambda(text)
+    if body:
+        return body, ""
+    if text.strip():
+        return None, "proposer-no-lambda"
+    return None, "proposer-unavailable"
+
+
+def _chat(key: str, timeout: float, champion_body: str) -> str | None:
     body = {
         "model": MODEL,
         "messages": [
             {"role": "system", "content": _SYSTEM},
-            {"role": "user", "content": "Propose one choose-fn body."},
+            {"role": "user", "content": user_message(champion_body)},
         ],
         "temperature": 0.2,
         "max_tokens": 2048,
