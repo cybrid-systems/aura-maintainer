@@ -65,6 +65,7 @@ def user_message(champion_body: str, fixture_rows: list | None = None) -> str:
         "Fixture rows. args are dgets dsets dhits dmisses devicted nkeys dexpired avg_ttl keys_ttl.",
         "A row matches when got equals expect. A tie is not kept.",
         "Leave every row whose got equals expect unchanged.",
+        'An expect of "" means that row must return the empty string. Replacing it drops the score.',
     ]
     if matched:
         lines.append("Matching rows: " + ", ".join(str(row_id) for row_id in matched))
