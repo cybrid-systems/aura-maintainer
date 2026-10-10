@@ -40,16 +40,40 @@ _SYSTEM = (
 )
 
 
-def user_message(champion_body: str) -> str:
-    """Ask for one edit of the live champion, with the string contract."""
+def user_message(champion_body: str, fixture_rows: list | None = None) -> str:
+    """Ask for one edit of the live champion, with the string contract.
+
+    ``fixture_rows`` entries are ``id``, ``args``, ``expect``, and ``got``.
+    """
     returns = ", ".join(_RETURNS)
-    return (
+    text = (
         "Edit the current choose-fn. Return one Aura lambda and nothing else. "
         "Every branch must return one of these strings: "
         f"{returns}. Do not return a number.\n"
         "Current body:\n"
         f"{champion_body}"
     )
+    if not fixture_rows:
+        return text
+    lines = [
+        "Fixture rows. args are dgets dsets dhits dmisses devicted nkeys dexpired avg_ttl keys_ttl.",
+        "A row matches when got equals expect. A tie is not kept.",
+    ]
+    for row in fixture_rows:
+        lines.append(
+            f"- {row.get('id')} args {row.get('args')} "
+            f"expect {json.dumps(row.get('expect', ''))} "
+            f"got {json.dumps(row.get('got', '?'))}"
+        )
+    return text + "\n" + "\n".join(lines)
+
+
+def key_available(key_file: Path | None = None) -> bool:
+    """True when a key file exists and has a non-empty first line."""
+    path = key_file or DEFAULT_KEY_FILE
+    if not path.is_file():
+        return False
+    return bool(_read_key(path))
 
 
 def propose_body(
@@ -58,6 +82,7 @@ def propose_body(
     stub: str | None = None,
     timeout: float = TIMEOUT_SEC,
     champion_body: str = "",
+    fixture_rows: list | None = None,
 ) -> tuple[str | None, str]:
     """Return ``(body, reason)``. ``reason`` is empty when ``body`` is set.
 
@@ -72,7 +97,7 @@ def propose_body(
     key = _read_key(path)
     if not key:
         return None, "proposer-unavailable"
-    content = _chat(key, timeout, champion_body)
+    content = _chat(key, timeout, champion_body, fixture_rows)
     if not content:
         return None, "proposer-unavailable"
     return _classify(content)
@@ -98,12 +123,17 @@ def _classify(text: str) -> tuple[str | None, str]:
     return None, "proposer-unavailable"
 
 
-def _chat(key: str, timeout: float, champion_body: str) -> str | None:
+def _chat(
+    key: str,
+    timeout: float,
+    champion_body: str,
+    fixture_rows: list | None = None,
+) -> str | None:
     body = {
         "model": MODEL,
         "messages": [
             {"role": "system", "content": _SYSTEM},
-            {"role": "user", "content": user_message(champion_body)},
+            {"role": "user", "content": user_message(champion_body, fixture_rows)},
         ],
         "temperature": 0.2,
         "max_tokens": 2048,

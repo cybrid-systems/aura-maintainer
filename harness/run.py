@@ -354,6 +354,7 @@ def build_request(
     proposal: dict | None,
     catalog: Catalog,
     fixtures: list,
+    score_only: bool = False,
 ) -> Path:
     body = (run_dir / "champion.body").read_text(encoding="utf-8")
     broken = catalog.bodies["broken"]
@@ -372,6 +373,8 @@ def build_request(
         },
         "fixtures": fixtures,
     }
+    if score_only:
+        request["score_only"] = True
     path = run_dir / "request.json"
     atomic_write(path, json.dumps(request, indent=2, sort_keys=True) + "\n")
     return path
@@ -391,10 +394,12 @@ def spawn_cycle(
     fixtures: list,
     beats: Heartbeat | None = None,
     crash_retries: int = 1,
+    score_only: bool = False,
 ) -> tuple[dict, str]:
     """Run one Aura process. Return (audit record, combined log)."""
     request_path = build_request(
         run_dir, run_id, cycle_id, mode, meta, proposal, catalog, fixtures,
+        score_only=score_only,
     )
     reentry = run_dir / "reentry.flag"
     if reentry.exists():
@@ -477,6 +482,7 @@ def spawn_cycle(
         return spawn_cycle(
             aura, run_dir, run_id, cycle_id, mode, meta, timeout_sec,
             proposal, dry_run, catalog, fixtures, beats, crash_retries - 1,
+            score_only,
         )
     reason = "crash" if proc.returncode not in (0, None) else "bad-json"
     record = synthetic_path_broken(
@@ -487,6 +493,45 @@ def spawn_cycle(
         duration_ms=duration_ms,
     )
     return record, text
+
+
+def champion_fixture_rows(
+    aura: str,
+    run_dir: Path,
+    run_id: str,
+    cycle_id: int,
+    mode: str,
+    meta: dict,
+    timeout_sec: float,
+    catalog: Catalog,
+    fixtures: list,
+) -> list[dict]:
+    """Score the live champion. The record is not an audit cycle."""
+    record, _log = spawn_cycle(
+        aura, run_dir, run_id, f"score-{cycle_id}", mode, meta, timeout_sec,
+        None, False, catalog, fixtures, None, 1, True,
+    )
+    scored: list = []
+    tests = record.get("tests")
+    if isinstance(tests, list) and tests and isinstance(tests[0], dict):
+        raw = tests[0].get("baseline_rows")
+        if isinstance(raw, list):
+            scored = raw
+    by_id: dict = {}
+    for row in scored:
+        if isinstance(row, dict) and isinstance(row.get("id"), str):
+            by_id[row["id"]] = row.get("got")
+    view = []
+    for row in fixtures:
+        if not isinstance(row, dict):
+            continue
+        view.append({
+            "id": row.get("id"),
+            "args": row.get("args"),
+            "expect": row.get("expect", ""),
+            "got": by_id.get(row.get("id"), "?"),
+        })
+    return view
 
 
 def _keep_after(meta: dict, proposal: dict, digest: str) -> tuple[dict, int]:
@@ -843,8 +888,17 @@ def main(argv: list[str] | None = None) -> int:
         if args.proposer == "llm":
             assert llm_mod is not None
             stub = os.environ.get("AM_LLM_STUB_BODY") if "AM_LLM_STUB_BODY" in os.environ else None
+            fixture_rows = None
+            if stub is None and llm_mod.key_available(args.llm_key):
+                fixture_rows = champion_fixture_rows(
+                    aura, run_dir, run_id, cycle_id, args.mode, meta,
+                    args.timeout_sec, catalog, fixtures,
+                )
             produced, why = llm_mod.propose_body(
-                key_file=args.llm_key, stub=stub, champion_body=body,
+                key_file=args.llm_key,
+                stub=stub,
+                champion_body=body,
+                fixture_rows=fixture_rows,
             )
             if produced is None:
                 proposal = None

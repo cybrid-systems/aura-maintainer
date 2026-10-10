@@ -180,6 +180,23 @@ class LlmAuraTests(unittest.TestCase):
         rows = load_audit(run_dir / "audit.jsonl")
         return rc, meta, rows[0]["reason"]
 
+    def test_recover_seed_score_reports_read_got(self) -> None:
+        run_dir = self.reports / "score"
+        run_dir.mkdir()
+        catalog = load_catalog()
+        meta = runmod.ensure_seed(run_dir, "recover", catalog)
+        rows = runmod.champion_fixture_rows(
+            AURA, run_dir, "score", 1, "recover", meta, 40,
+            catalog, runmod.load_fixtures(),
+        )
+        by_id = {row["id"]: row for row in rows}
+        self.assertEqual(len(rows), 10)
+        self.assertEqual(by_id["read"]["got"], "lru|flat")
+        self.assertEqual(by_id["read"]["expect"], "lru|flat")
+        self.assertEqual(by_id["w110"]["expect"], "lfu|flat|pin")
+        self.assertEqual(by_id["w110"]["got"], "")
+        self.assertFalse((run_dir / "audit.jsonl").exists())
+
     def test_socket_body_is_grammar_rejected(self) -> None:
         rc, meta, reason = self._run_stub(PREFIX + "(socket))", "socket")
         self.assertEqual(rc, 0)
@@ -233,6 +250,16 @@ class PromptTests(unittest.TestCase):
         body, why = llm_mod.propose_body(stub=champion)
         self.assertEqual(body, champion)
         self.assertEqual(why, "")
+        shown = llm_mod.user_message(champion, [{
+            "id": "w110",
+            "args": [30, 80, 10, 40, 0, 50, 0, 0, 0],
+            "expect": "lfu|flat|pin",
+            "got": "",
+        }])
+        self.assertIn("w110", shown)
+        self.assertIn("[30, 80, 10, 40, 0, 50, 0, 0, 0]", shown)
+        self.assertIn('expect "lfu|flat|pin"', shown)
+        self.assertIn('got ""', shown)
 
 
 class ReadLimitTests(unittest.TestCase):
