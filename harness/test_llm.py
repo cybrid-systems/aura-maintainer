@@ -283,6 +283,14 @@ class PromptTests(unittest.TestCase):
         self.assertIn("[30, 80, 10, 40, 0, 50, 0, 0, 0]", shown)
         self.assertIn('expect "lfu|flat|pin"', shown)
         self.assertIn('got ""', shown)
+        self.assertIn("Leave every row whose got equals expect unchanged.", shown)
+        self.assertIn("Rows to fix: w110", shown)
+        held = llm_mod.user_message(champion, [
+            {"id": "read", "args": [500, 10, 480, 20, 0, 50, 0, 0, 0], "expect": "lru|flat", "got": "lru|flat"},
+            {"id": "miss40", "args": [40, 50, 10, 30, 0, 40, 0, 0, 0], "expect": "lfu|flat|pin", "got": ""},
+        ])
+        self.assertIn("Matching rows: read", held)
+        self.assertIn("Rows to fix: miss40", held)
 
 
 class ReadLimitTests(unittest.TestCase):
