@@ -42,6 +42,35 @@ class StreakTests(unittest.TestCase):
         streak = next_streak(streak, {"decision": "PATH_BROKEN", "reason": "crash"})
         self.assertEqual(streak, 3)
 
+    def test_uninstalled_rebind_does_not_block_or_count_as_body_change(self) -> None:
+        refused = {"decision": "PATH_BROKEN", "reason": "proposal-rebind"}
+        rolled = {"decision": "ROLLBACK", "reason": "proposal:no-improvement"}
+        crash = {"decision": "PATH_BROKEN", "reason": "crash"}
+        leaked = {"decision": "PATH_BROKEN", "reason": "proposal-rebind-leaked"}
+        self.assertFalse(runmod.resume_blocked([refused] * 3))
+        self.assertEqual(runmod.opening_streak([refused] * 2 + [rolled] + [refused] * 3), 0)
+        self.assertEqual(runmod.opening_streak([refused] * 3 + [crash, crash]), 2)
+        self.assertTrue(runmod.resume_blocked([crash] * 3))
+        self.assertTrue(runmod.resume_blocked([refused, refused, crash]))
+        self.assertTrue(runmod.resume_blocked([refused] * 3 + [rolled] + [leaked] * 3))
+        rejected = {
+            "decision": "ROLLBACK",
+            "reason": "proposal:rebind-rejected",
+            "trial_body_changed": True,
+            "compile_epoch_delta": 0,
+        }
+        self.assertEqual(next_streak(2, rejected), 0)
+        self.assertFalse(runmod.real_body_change(rejected))
+        self.assertEqual(runmod.silent_epoch_streak([rejected] * 5), 0)
+        drop = {
+            "decision": "ROLLBACK",
+            "reason": "proposal:score-drop",
+            "trial_body_changed": True,
+            "compile_epoch_delta": 0,
+        }
+        self.assertTrue(runmod.real_body_change(drop))
+        self.assertEqual(runmod.silent_epoch_streak([drop] * 5), 5)
+
     def test_exit_code_keeps_isolated_broken(self) -> None:
         records = [synthetic_path_broken(run_id="r", cycle_id=1, reason="crash")]
         self.assertEqual(exit_code_for(records, stopped_early=False), 3)
@@ -111,6 +140,80 @@ print('CYCLE_JSON {"schema":"aura-maintainer.audit.v1","decision":"PATH_BROKEN",
         self.assertEqual(self._spawns(), ["1", "2", "3"])
         rows = load_audit(self.reports / "strikes" / "audit.jsonl")
         self.assertEqual([r["decision"] for r in rows], ["PATH_BROKEN"] * 3)
+
+    def test_proposal_rebind_resume_still_spawns(self) -> None:
+        aura = self._fake("rebind_resume.py", """#!/usr/bin/env python3
+import os
+cid = os.environ.get("AM_CYCLE_ID", "0")
+open(os.environ["AM_SPAWN_LOG"], "a", encoding="utf-8").write(cid + "\\n")
+print('CYCLE_JSON {"schema":"aura-maintainer.audit.v1","decision":"ROLLBACK","reason":"proposal:no-improvement","snapshot_id":null,"cycle_id":%s}' % cid)
+""")
+        rc = runmod.main([
+            "--aura-bin", aura,
+            "--cycles", "1",
+            "--reports-dir", str(self.reports),
+            "--run-id", "rebind-resume",
+            "--timeout-sec", "5",
+        ])
+        self.assertEqual(rc, 0)
+        run_dir = self.reports / "rebind-resume"
+        with open(run_dir / "audit.jsonl", "a", encoding="utf-8") as fh:
+            for cycle_id in (2, 3, 4):
+                fh.write(json.dumps({
+                    "schema": "aura-maintainer.audit.v1",
+                    "decision": "PATH_BROKEN",
+                    "reason": "proposal-rebind",
+                    "cycle_id": cycle_id,
+                }) + "\n")
+        self.spawn_log.write_text("", encoding="utf-8")
+        rc = runmod.main([
+            "--aura-bin", aura,
+            "--cycles", "1",
+            "--resume", "rebind-resume",
+            "--reports-dir", str(self.reports),
+            "--timeout-sec", "5",
+        ])
+        self.assertEqual(self._spawns(), ["5"])
+        self.assertEqual(rc, 3)
+        rows = load_audit(run_dir / "audit.jsonl")
+        self.assertEqual(rows[-1]["decision"], "ROLLBACK")
+        self.assertEqual(rows[-1]["cycle_id"], 5)
+
+    def test_crash_streak_resume_does_not_spawn(self) -> None:
+        aura = self._fake("crash_resume.py", """#!/usr/bin/env python3
+import os
+open(os.environ["AM_SPAWN_LOG"], "a", encoding="utf-8").write("spawned\\n")
+print('CYCLE_JSON {"schema":"aura-maintainer.audit.v1","decision":"IDLE","reason":"not-implemented","snapshot_id":null,"cycle_id":1}')
+""")
+        rc = runmod.main([
+            "--aura-bin", aura,
+            "--cycles", "1",
+            "--reports-dir", str(self.reports),
+            "--run-id", "crash-resume",
+            "--timeout-sec", "5",
+        ])
+        self.assertEqual(rc, 0)
+        run_dir = self.reports / "crash-resume"
+        with open(run_dir / "audit.jsonl", "a", encoding="utf-8") as fh:
+            for cycle_id in (2, 3, 4):
+                fh.write(json.dumps({
+                    "schema": "aura-maintainer.audit.v1",
+                    "decision": "PATH_BROKEN",
+                    "reason": "crash",
+                    "cycle_id": cycle_id,
+                }) + "\n")
+        before = (run_dir / "audit.jsonl").read_text(encoding="utf-8")
+        self.spawn_log.write_text("", encoding="utf-8")
+        rc = runmod.main([
+            "--aura-bin", aura,
+            "--cycles", "1",
+            "--resume", "crash-resume",
+            "--reports-dir", str(self.reports),
+            "--timeout-sec", "5",
+        ])
+        self.assertEqual(rc, 3)
+        self.assertEqual(self._spawns(), [])
+        self.assertEqual((run_dir / "audit.jsonl").read_text(encoding="utf-8"), before)
 
     def test_proposal_rollback_resets_streak(self) -> None:
         aura = self._fake("reset.py", """#!/usr/bin/env python3

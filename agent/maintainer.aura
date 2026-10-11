@@ -251,21 +251,26 @@
             after
             "mismatch"))))))
 
-(define (broken-rejected loc snap base)
-  ; This runtime's rebind typecheck refuses the unbound call, so the bad
-  ; body is not installed. The probe is OK only when the live closure is
-  ; still the champion we scored before the attempt.
+(define (uninstalled-rebind loc snap base pid decision reason leaked)
+  ; mutate:rebind was not exact #t, so this cycle does not enter the trial.
+  ; The refusal is safe only when the live closure still matches the tally
+  ; taken before the attempt. A changed closure is still PATH_BROKEN.
   (let* ((now (tally))
          (tests (list (hash "name" "fixture"
                             "baseline_score" (hash-ref base "score")
                             "trial_score" (hash-ref now "score")
                             "baseline_rows" (hash-ref base "rows")
-                            "trial_rows" (hash-ref now "rows")))))
+                            "trial_rows" (hash-ref now "rows"))))
+         (outcome (if (string=? decision "PROBE_OK") "probe" "rejection")))
     (if (rows-same? (hash-ref base "rows") (hash-ref now "rows"))
-      (with-restore "PROBE_OK" "broken-rejected" "probe" loc snap
-                    (empty-prov) 0 '() tests "probe:broken" base)
-      (finish "PATH_BROKEN" "broken-reject-leaked" "path-broken" loc snap
+      (with-restore decision reason outcome loc snap
+                    (empty-prov) 0 '() tests pid base)
+      (finish "PATH_BROKEN" leaked "path-broken" loc snap
               (empty-prov) 0 '() tests))))
+
+(define (broken-rejected loc snap base)
+  (uninstalled-rebind loc snap base "probe:broken"
+                      "PROBE_OK" "broken-rejected" "broken-reject-leaked"))
 
 (define (apply-proposal loc)
   (let* ((pid (proposal-id))
@@ -286,8 +291,9 @@
               (newline)
               (if (string=? pid "probe:broken")
                 (broken-rejected loc snap base)
-                (finish "PATH_BROKEN" "proposal-rebind" "path-broken" loc snap
-                        (empty-prov) 0 '() '())))
+                (uninstalled-rebind loc snap base pid
+                                    "ROLLBACK" "proposal:rebind-rejected"
+                                    "proposal-rebind-leaked")))
             (let ((ev (try (begin (eval-current) #t) (catch (e) #f))))
               (if (not ev)
                 (finish "PATH_BROKEN" "proposal-eval" "path-broken" loc snap

@@ -214,6 +214,39 @@ class LlmAuraTests(unittest.TestCase):
         self.assertNotEqual(reason, "fixture_score")
         self.assertEqual(meta["generation"], 0)
 
+    def test_unbound_rebind_is_rollback_and_does_not_stop(self) -> None:
+        body = PREFIX + "(if (> miss-ct 0) \"lfu|flat|pin\" \"\"))"
+        self.assertTrue(grammar_ok(body))
+        self.assertTrue(call_heads_allowed(body))
+        os.environ["AM_LLM_STUB_BODY"] = body
+        rc = runmod.main([
+            "--aura-bin", AURA,
+            "--proposer", "llm",
+            "--llm-key", str(Path(self.tmp.name) / "missing-key"),
+            "--cycles", "5",
+            "--mode", "hold",
+            "--reports-dir", str(self.reports),
+            "--run-id", "unbound",
+            "--timeout-sec", "40",
+        ])
+        run_dir = self.reports / "unbound"
+        rows = load_audit(run_dir / "audit.jsonl")
+        reasons = [row.get("reason") for row in rows]
+        self.assertEqual(rc, 0, reasons)
+        self.assertEqual(reasons, ["proposal:rebind-rejected"] * 5)
+        for row in rows:
+            block = row["tests"][0]
+            self.assertEqual(block.get("restored_rows"), block.get("baseline_rows"))
+            self.assertIsInstance(row.get("snapshot_id"), int)
+        meta = json.loads((run_dir / "champion.meta.json").read_text(encoding="utf-8"))
+        catalog = load_catalog()
+        seed = runmod.sha256_bytes(runmod.seed_body(catalog, "hold").encode("utf-8"))
+        self.assertEqual(meta["body_sha256"], seed)
+        self.assertEqual(meta["generation"], 0)
+        log = (run_dir / "cycles" / "1.log").read_text(encoding="utf-8")
+        self.assertIn("REBIND", log)
+        self.assertIn("unbound variable", log)
+
 
 class _Chunks:
     def __init__(self, data: bytes) -> None:

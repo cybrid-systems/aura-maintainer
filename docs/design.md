@@ -1011,3 +1011,7 @@ Soak 默认关闭。不传 `--hours` 时，目录耗尽就停，不空转心跳�
 `--proposer` 默认 `rules`。只有 `--proposer llm` 才导入 `harness/proposers/llm.py`。密钥文件是 `~/code/keys/minimax`，模型 `MiniMax-M3`，端点 `https://api.minimaxi.com/v1/chat/completions`，超时 30 秒。实现不把密钥写入进程环境。缺密钥或调用失败是 `IDLE` `proposer-unavailable`。桩环境变量 `AM_LLM_STUB_BODY` 只给测试用，不走网络。调用头允许表在子串绊线之外，只用于这条 LLM 路径；闭集里的 `probe:broken` 仍按 harness 写入的 `controls.broken_body` 放行。
 
 当前构建的 `mutate:rebind` 会在类型检查里拒绝 `choose_broken` 的未绑定调用，返回值不是 `#t`，坏 body 不会装上。`probe:broken` 在这条路径上记 `PROBE_OK` `reason=broken-rejected`：拒绝之后现场夹具必须仍等于变异前的 baseline，然后再 `ast:restore` + `eval-current`。若拒绝之后闭包已经变了，才是 `PATH_BROKEN` `broken-reject-leaked`。能装上的旧运行时仍走「每行 throw」那条 `broken-threw`。
+
+其它提议碰到同一种「返回值不是精确 `#t`」时，也不进入 trial。现场夹具仍等于变异前 baseline，记 `ROLLBACK` `reason=proposal:rebind-rejected`，然后同样 `ast:restore` + 裸 `eval-current`。闭包已经变了才是 `PATH_BROKEN` `proposal-rebind-leaked`。精确 `#t` 仍是进入 trial 的唯一入口。`proposal:rebind-rejected` 清掉连续 `PATH_BROKEN` 计数，也不算真实 body 变化，所以 epoch delta 为 0 不会累加到 `incremental-compile-silent`。`probe:broken` 仍走 `broken-rejected`。
+
+审计里已经写下的 `PATH_BROKEN` `proposal-rebind` 不改写。这种 reason 单独凑满连续三次时，`--resume` 仍继续。别的 `PATH_BROKEN` 凑满三次照旧拒绝 resume。旧行还在审计里，所以这条 run 跑完墙钟的退出码仍是 3。

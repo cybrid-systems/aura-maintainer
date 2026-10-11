@@ -323,7 +323,13 @@ def real_body_change(record: dict) -> bool:
     if not record.get("trial_body_changed"):
         return False
     reason = str(record.get("reason") or "")
-    if reason in ("proposal:dry-run", "proposal:grammar", "proposal:call-head", "broken-rejected"):
+    if reason in (
+        "proposal:dry-run",
+        "proposal:grammar",
+        "proposal:call-head",
+        "broken-rejected",
+        "proposal:rebind-rejected",
+    ):
         return False
     decision = record.get("decision")
     if decision in ("KEEP", "PROBE_OK", "PROBE_FAIL", "ROLLBACK"):
@@ -331,6 +337,37 @@ def real_body_change(record: dict) -> bool:
     if decision == "PATH_BROKEN" and reason in REBIND_BROKEN:
         return True
     return False
+
+
+def opening_streak(records: list[dict]) -> int | None:
+    """Streak to carry into the loop. None means do not resume.
+
+    Three PATH_BROKEN in a row still block. A streak whose reasons are all
+    proposal-rebind is cleared and the walk continues: that line is a
+    typecheck refusal that did not install a body. The audit lines stay,
+    so a finished run still exits 3.
+    """
+    streak = 0
+    reasons: list[str] = []
+    for rec in records:
+        before = streak
+        streak = next_streak(streak, rec)
+        if streak == 0:
+            reasons = []
+            continue
+        if streak > before:
+            reasons.append(str(rec.get("reason") or ""))
+        if streak >= STREAK_LIMIT:
+            if reasons and all(reason == "proposal-rebind" for reason in reasons):
+                streak = 0
+                reasons = []
+                continue
+            return None
+    return streak
+
+
+def resume_blocked(records: list[dict]) -> bool:
+    return opening_streak(records) is None
 
 
 def silent_epoch_streak(records: list[dict]) -> int:
@@ -661,15 +698,6 @@ def next_cycle_id(records: list[dict]) -> int:
     return (max(ids) + 1) if ids else 1
 
 
-def streak_from(records: list[dict]) -> int:
-    streak = 0
-    for rec in records:
-        streak = next_streak(streak, rec)
-        if streak >= STREAK_LIMIT:
-            return streak
-    return streak
-
-
 def idle_record(run_id: str, cycle_id: int, reason: str) -> dict:
     return {
         "schema": AUDIT_SCHEMA,
@@ -866,9 +894,9 @@ def main(argv: list[str] | None = None) -> int:
         return 3
 
     records = load_audit(run_dir / "audit.jsonl")
-    streak = streak_from(records)
-    if streak >= STREAK_LIMIT:
-        print(f"run={run_id} already at PATH_BROKEN streak {streak}", file=sys.stderr)
+    streak = opening_streak(records)
+    if streak is None:
+        print(f"run={run_id} already at PATH_BROKEN streak {STREAK_LIMIT}", file=sys.stderr)
         return 3
 
     tried = load_tried(run_dir)
