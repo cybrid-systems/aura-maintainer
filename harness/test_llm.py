@@ -314,10 +314,10 @@ class PromptTests(unittest.TestCase):
         }])
         self.assertIn("w110", shown)
         self.assertIn("[30, 80, 10, 40, 0, 50, 0, 0, 0]", shown)
-        self.assertIn('expect "lfu|flat|pin"', shown)
+        self.assertNotIn("expect ", shown)
         self.assertIn('got ""', shown)
-        self.assertIn("Leave every row whose got equals expect unchanged.", shown)
-        self.assertIn('An expect of "" means that row must return the empty string.', shown)
+        self.assertIn("Leave every matching row's return string unchanged.", shown)
+        self.assertIn("The expected string is not shown.", shown)
         self.assertIn("Rows to fix: w110", shown)
         held = llm_mod.user_message(champion, [
             {"id": "read", "args": [500, 10, 480, 20, 0, 50, 0, 0, 0], "expect": "lru|flat", "got": "lru|flat"},
@@ -325,6 +325,9 @@ class PromptTests(unittest.TestCase):
         ])
         self.assertIn("Matching rows: read", held)
         self.assertIn("Rows to fix: miss40", held)
+        fixture = held.split("Fixture rows.", 1)[1]
+        self.assertNotIn("expect ", fixture)
+        self.assertNotIn('"lru|flat"', fixture)
         blank = llm_mod.user_message(champion, [{
             "id": "w30",
             "args": [10, 20, 5, 15, 0, 40, 0, 0, 0],
@@ -332,7 +335,7 @@ class PromptTests(unittest.TestCase):
             "got": "lfu|flat|pin",
         }])
         self.assertIn("Rows to fix: w30", blank)
-        self.assertIn('expect ""', blank)
+        self.assertNotIn("expect ", blank)
         self.assertIn('got "lfu|flat|pin"', blank)
 
 

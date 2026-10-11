@@ -414,10 +414,11 @@ KEEP 条件（同时满足）：
 
 1. `proposal.keep_eligible == true`；
 2. 每一行调用都不抛；
-3. `trial_score > baseline_score`；
-4. `soft22` 在 trial 时若 baseline 已经匹配，trial 不得失配（软门不得为了别的行被拆掉；这条被「严格大于」覆盖，单列出来是为了让 reason 能写成 `proposal:soft-regressed`）。
+3. 训练夹具分上升，或训练分不降且属性适应度上升。适应度不是这 10 行的 expect，而是留出集上的三条信号约束：`ops < 40` 必须返回 `""`，`erate >= 20` 必须返回带 `|soft` 的核，TTL 压力且 `erate < 20` 必须返回 `ttl_aware|flat` 或 `ttl_aware|flat|soft`；
+4. 适应度不得下降。下降是 `ROLLBACK` `proposal:fitness-drop`，即使训练分上升；
+5. baseline 里已经 `got == expect` 的行，trial 的 `got` 不得改变。`soft22` 仍单独记 `proposal:soft-regressed`。其它行记 `proposal:matched-row-changed`。
 
-同分：`ROLLBACK`，`reason=proposal:no-improvement`。分下降：`proposal:score-drop`。`keep_eligible` 的提议若某行是捉住的 `throw`：`proposal:contract-throw`，并且仍然要走下面的恢复。这些都是拒绝，不是路径损坏。
+比较顺序：抛错，然后 `soft22` 回归，然后其它已匹配行变化，然后适应度下降，然后训练分上升才 KEEP，然后仅适应度上升才 KEEP，然后训练分下降 `proposal:score-drop`，否则 `proposal:no-improvement`。因此梯子尽头打坏已匹配行时，原因是 `proposal:matched-row-changed` 而不是 `proposal:score-drop`。`keep_eligible` 为假的对照不走前四条，训练分下降仍是 `proposal:score-drop`。这些都是拒绝，不是路径损坏。KEEP 之前用 `hot-strategy:register!` 记下当前 body，再调用一次夹具；装上后的行向量必须等于 trial。ROLLBACK 在 `eval-current` 之后同样 `register!` 回 champion，再核对 baseline。不调用 `swap!`。这是维护者工作区里的安装，不写 `policy_agent.aura`，也不改 `target/aura-redis`。
 
 恢复顺序（ROLLBACK 与两条探针，以及 `ast:restore` 失败后的那次 `heal!`）：
 
@@ -562,7 +563,7 @@ Schema 名：`aura-maintainer.audit.v1`。
 
 1. body 文件就位（KEEP 时 after，其它决策只引用已有 champion sha）；
 2. 追加审计行，`flush` + `os.fsync`；
-3. 仅当 `decision==KEEP` 且 `keep_eligible` 且 `trial_score > baseline_score`：写 `champion.body` 与 `champion.meta.json`（temp + fsync + rename）；
+3. 仅当 `decision==KEEP` 且 `keep_eligible`，并且训练分上升，或训练分不降且属性适应度上升：写 `champion.body` 与 `champion.meta.json`（temp + fsync + rename）。训练分下降、适应度下降、或已匹配行的 `got` 变了，Python 把这条改写成 `PATH_BROKEN` `kept-ineligible`，不换 champion；
 4. 更新 `tried.json` 与 `curve.jsonl`（同样 fsync）。
 
 resume：读审计，丢掉最后一行损坏的 JSON；若最后一条合法 KEEP 的 `after.body_sha256` 与 `champion.meta` 不一致，以审计为准重写 champion（body 文件应已存在；不存在则 `PATH_BROKEN` `reason=resume-missing-body`，停）。不从 `snapshot_id` 恢复。PR1 用两个不需要 soak 的 harness 测试覆盖崩溃窗口：超时杀掉尚未打出完整 `CYCLE_JSON` 的子进程时 `champion.meta` 不变；审计里已有 KEEP 但 meta 的 sha 不同则 `--resume` 按审计重写，body 文件缺失则停在 `resume-missing-body`。PR5 另测「审计已 fsync 且 champion 已 rename 之后再杀」不重复已完成的 cycle。

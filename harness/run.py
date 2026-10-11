@@ -34,6 +34,7 @@ from harness.audit import (
     next_streak,
     synthetic_path_broken,
 )
+from harness.fitness import load_fitness_rows
 from harness.catalog import (
     Catalog,
     Champion,
@@ -313,10 +314,46 @@ def meta_view(meta: dict, digest: str | None = None) -> dict:
 
 
 def score_pair(record: dict) -> tuple[int | None, int | None]:
+    block = _test_block(record)
+    if block is None:
+        return None, None
+    return as_int(block.get("baseline_score")), as_int(block.get("trial_score"))
+
+
+def fitness_pair(record: dict) -> tuple[int | None, int | None]:
+    block = _test_block(record)
+    if block is None:
+        return None, None
+    return as_int(block.get("baseline_fitness")), as_int(block.get("trial_fitness"))
+
+
+def _test_block(record: dict) -> dict | None:
     tests = record.get("tests")
     if not isinstance(tests, list) or not tests or not isinstance(tests[0], dict):
-        return None, None
-    return as_int(tests[0].get("baseline_score")), as_int(tests[0].get("trial_score"))
+        return None
+    return tests[0]
+
+
+def matched_row_changed(record: dict) -> bool:
+    """True when a training row that already matched its expect changes got."""
+    block = _test_block(record)
+    if block is None:
+        return False
+    base_rows = block.get("baseline_rows")
+    trial_rows = block.get("trial_rows")
+    if not isinstance(base_rows, list) or not isinstance(trial_rows, list):
+        return False
+    trial_got = {
+        row.get("id"): row.get("got")
+        for row in trial_rows
+        if isinstance(row, dict)
+    }
+    for row in base_rows:
+        if not isinstance(row, dict):
+            continue
+        if row.get("got") == row.get("expect") and trial_got.get(row.get("id")) != row.get("got"):
+            return True
+    return False
 
 
 def real_body_change(record: dict) -> bool:
@@ -392,6 +429,7 @@ def build_request(
     catalog: Catalog,
     fixtures: list,
     score_only: bool = False,
+    fitness_rows: list | None = None,
 ) -> Path:
     body = (run_dir / "champion.body").read_text(encoding="utf-8")
     broken = catalog.bodies["broken"]
@@ -409,6 +447,7 @@ def build_request(
             "broken_sha256": sha256_bytes(broken.encode("utf-8")),
         },
         "fixtures": fixtures,
+        "fitness_rows": load_fitness_rows() if fitness_rows is None else fitness_rows,
     }
     if score_only:
         request["score_only"] = True
@@ -432,11 +471,13 @@ def spawn_cycle(
     beats: Heartbeat | None = None,
     crash_retries: int = 1,
     score_only: bool = False,
+    fitness_rows: list | None = None,
 ) -> tuple[dict, str]:
     """Run one Aura process. Return (audit record, combined log)."""
     request_path = build_request(
         run_dir, run_id, cycle_id, mode, meta, proposal, catalog, fixtures,
         score_only=score_only,
+        fitness_rows=fitness_rows,
     )
     reentry = run_dir / "reentry.flag"
     if reentry.exists():
@@ -519,7 +560,7 @@ def spawn_cycle(
         return spawn_cycle(
             aura, run_dir, run_id, cycle_id, mode, meta, timeout_sec,
             proposal, dry_run, catalog, fixtures, beats, crash_retries - 1,
-            score_only,
+            score_only, fitness_rows,
         )
     reason = "crash" if proc.returncode not in (0, None) else "bad-json"
     record = synthetic_path_broken(
@@ -635,7 +676,18 @@ def commit_record(
 
     if record.get("decision") == "KEEP":
         base, trial = score_pair(record)
-        scores_ok = base is not None and trial is not None and trial > base
+        base_fit, trial_fit = fitness_pair(record)
+        fixture_up = base is not None and trial is not None and trial > base
+        fixture_down = base is not None and trial is not None and trial < base
+        fitness_up = base_fit is not None and trial_fit is not None and trial_fit > base_fit
+        fitness_down = base_fit is not None and trial_fit is not None and trial_fit < base_fit
+        # A fixture rise does not excuse a property-score drop or a matched row.
+        scores_ok = (
+            (fixture_up or fitness_up)
+            and not fixture_down
+            and not fitness_down
+            and not matched_row_changed(record)
+        )
         proposal_ok = isinstance(proposal, dict) and proposal.get("keep_eligible") is True
         eligible = record.get("keep_eligible") is True and proposal_ok
         if not (eligible and scores_ok and isinstance(proposal, dict)):
@@ -656,7 +708,12 @@ def commit_record(
             after, generation = _keep_after(meta, proposal, digest)
             record["after"] = after
             record["champion_generation"] = generation
-            record["metrics_delta"] = {"fixture_score": (trial or 0) - (base or 0)}
+            delta: dict[str, int] = {}
+            if base is not None and trial is not None:
+                delta["fixture_score"] = trial - base
+            if base_fit is not None and trial_fit is not None:
+                delta["fitness_score"] = trial_fit - base_fit
+            record["metrics_delta"] = delta
             record["keep_eligible"] = True
     else:
         record["after"] = before

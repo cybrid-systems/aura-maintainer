@@ -41,9 +41,10 @@ _SYSTEM = (
 
 
 def user_message(champion_body: str, fixture_rows: list | None = None) -> str:
-    """Ask for one edit of the live champion, with the string contract.
+    """Ask for one edit. The model sees scores and live returns, not expects.
 
-    ``fixture_rows`` entries are ``id``, ``args``, ``expect``, and ``got``.
+    ``fixture_rows`` may contain ``expect`` so the harness can tell a match
+    from a miss. That field is not copied into the prompt.
     """
     returns = ", ".join(_RETURNS)
     text = (
@@ -58,23 +59,20 @@ def user_message(champion_body: str, fixture_rows: list | None = None) -> str:
     matched = [
         row.get("id") for row in fixture_rows if row.get("got") == row.get("expect")
     ]
-    missed = [
-        row.get("id") for row in fixture_rows if row.get("got") != row.get("expect")
-    ]
+    missed = [row for row in fixture_rows if row.get("got") != row.get("expect")]
     lines = [
         "Fixture rows. args are dgets dsets dhits dmisses devicted nkeys dexpired avg_ttl keys_ttl.",
-        "A row matches when got equals expect. A tie is not kept.",
-        "Leave every row whose got equals expect unchanged.",
-        'An expect of "" means that row must return the empty string. Replacing it drops the score.',
+        "The expected string is not shown.",
+        "Leave every matching row's return string unchanged.",
+        "A tie is not kept.",
     ]
     if matched:
         lines.append("Matching rows: " + ", ".join(str(row_id) for row_id in matched))
     if missed:
-        lines.append("Rows to fix: " + ", ".join(str(row_id) for row_id in missed))
-    for row in fixture_rows:
+        lines.append("Rows to fix: " + ", ".join(str(row.get("id")) for row in missed))
+    for row in missed:
         lines.append(
             f"- {row.get('id')} args {row.get('args')} "
-            f"expect {json.dumps(row.get('expect', ''))} "
             f"got {json.dumps(row.get('got', '?'))}"
         )
     return text + "\n" + "\n".join(lines)
