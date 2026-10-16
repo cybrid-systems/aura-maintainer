@@ -1,8 +1,12 @@
-"""--mode repo without a worktree apply. No soak and no MiniMax."""
+"""--mode repo switches. The injected empty registry does not apply.
+
+The CLI default catalog keeps one comment. No soak and no MiniMax.
+"""
 
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -21,6 +25,9 @@ from harness.repo_audit import (
 )
 from harness.repo_run import main as repo_main
 
+ROOT = Path(__file__).resolve().parent.parent
+TARGET = ROOT / "target" / "aura-redis"
+
 
 class RepoModeTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -28,7 +35,10 @@ class RepoModeTests(unittest.TestCase):
         self.reports = Path(self.tmp.name)
 
     def tearDown(self) -> None:
-        self.tmp.cleanup()
+        try:
+            _remove_worktrees_under(self, self.reports)
+        finally:
+            self.tmp.cleanup()
 
     def test_parse_defaults(self) -> None:
         hold = runmod.parse_args([])
@@ -65,19 +75,21 @@ class RepoModeTests(unittest.TestCase):
         self.assertFalse((run_dir / "champion.body").exists())
         self.assertFalse((run_dir / "champion.meta.json").exists())
 
-    def test_cli_omitted_cycles_idles_once(self) -> None:
+    def test_cli_omitted_cycles_keeps_then_idles(self) -> None:
         before = set(sys.modules)
+        choose = TARGET / "src" / "redis" / "policy" / "choose_normal.aura"
+        original = choose.read_bytes()
         rc = runmod.main([
             "--mode", "repo",
             "--reports-dir", str(self.reports),
-            "--run-id", "cli-idle",
+            "--run-id", "cli-keep",
         ])
         self.assertEqual(rc, 0)
         self.assertNotIn("harness.proposers.llm", set(sys.modules) - before)
-        rows = load_audit(self.reports / "cli-idle" / "audit.jsonl")
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["decision"], "IDLE")
-        self.assertEqual(rows[0]["reason"], "repo-catalog-empty")
+        rows = load_audit(self.reports / "cli-keep" / "audit.jsonl")
+        self.assertEqual([row["decision"] for row in rows], ["KEEP", "IDLE"])
+        self.assertEqual(rows[1]["reason"], "repo-catalog-empty")
+        self.assertEqual(choose.read_bytes(), original)
 
     def test_repo_cycles_zero_exits_2(self) -> None:
         rc = runmod.main([
@@ -164,6 +176,35 @@ class RepoModeTests(unittest.TestCase):
         self.assertEqual(kept["operator"], "disk-patch")
         self.assertNotIn("before", kept)
         self.assertNotIn("after", kept)
+
+
+def _remove_worktrees_under(case: unittest.TestCase, reports: Path) -> None:
+    """Drop maintainer worktrees registered under this reports dir. Do not prune."""
+    root = reports.resolve()
+
+    def listed() -> list[str]:
+        proc = subprocess.run(
+            ["git", "-C", str(TARGET), "worktree", "list", "--porcelain"],
+            capture_output=True, text=True, check=False,
+        )
+        found = []
+        for line in proc.stdout.splitlines():
+            if not line.startswith("worktree "):
+                continue
+            path = Path(line.split(" ", 1)[1])
+            try:
+                path.resolve().relative_to(root)
+            except ValueError:
+                continue
+            found.append(str(path))
+        return found
+
+    for path in listed():
+        subprocess.run(
+            ["git", "-C", str(TARGET), "worktree", "remove", "--force", path],
+            check=False,
+        )
+    case.assertEqual(listed(), [])
 
 
 def _help_text() -> str:

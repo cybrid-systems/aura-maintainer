@@ -20,6 +20,7 @@ from harness.run import sha256_bytes
 
 ALLOW_PATH = "src/redis/policy/choose_normal.aura"
 COMMIT_SUBJECT = "maintainer: clear comment-drift choose_normal erate-50"
+_git_log: Path | None = None
 _GIT_ID = (
     "-c", "user.name=aura-maintainer",
     "-c", "user.email=aura-maintainer@localhost",
@@ -57,14 +58,27 @@ def worktree_dir(layout: Layout) -> Path:
     return layout.run_dir / "worktree"
 
 
+def set_git_log(path: Path | None) -> None:
+    """Append later git stderr to this file. None turns the log off."""
+    global _git_log
+    _git_log = path
+
+
 def _git(cwd: Path, *args: str, identity: bool = False) -> subprocess.CompletedProcess[str]:
     cmd = ["git", *_GIT_ID, *args] if identity else ["git", *args]
     try:
-        return subprocess.run(
+        proc = subprocess.run(
             cmd, cwd=str(cwd), capture_output=True, text=True, check=False,
         )
     except OSError as exc:
-        return subprocess.CompletedProcess(cmd, 1, "", str(exc))
+        proc = subprocess.CompletedProcess(cmd, 1, "", str(exc))
+    if _git_log is not None and proc.stderr:
+        _git_log.parent.mkdir(parents=True, exist_ok=True)
+        with _git_log.open("a", encoding="utf-8", errors="replace") as fh:
+            fh.write(proc.stderr)
+            if not proc.stderr.endswith("\n"):
+                fh.write("\n")
+    return proc
 
 
 def _closed(records: list[dict]) -> bool:
@@ -114,7 +128,14 @@ def _under_run(layout: Layout, path: Path) -> bool:
     return True
 
 
-def _append_broken(layout: Layout, reason: str, base: str | None) -> None:
+def _append_broken(
+    layout: Layout,
+    reason: str,
+    base: str | None,
+    *,
+    preimage_sha256: str | None = None,
+    proposal_id: str | None = None,
+) -> None:
     rows = load_audit(layout.run_dir / "audit.jsonl")
     cycle_id = 1 + max((int(rec.get("cycle_id") or 0) for rec in rows), default=0)
     append_jsonl(
@@ -124,6 +145,8 @@ def _append_broken(layout: Layout, reason: str, base: str | None) -> None:
             cycle_id=cycle_id,
             reason=reason,
             base_git_sha=base,
+            proposal_id=proposal_id,
+            preimage_sha256=preimage_sha256,
         ),
     )
 
@@ -251,16 +274,25 @@ def arm_pending(layout: Layout, preimage: bytes, *, cycle_id: int = 1, phase: st
     atomic_write_bytes(layout.run_dir / "preimage" / f"{cycle_id}.bin", preimage)
 
 
-def apply_bytes(layout: Layout, data: bytes, *, relpath: str | None = None) -> Step:
+def apply_bytes(
+    layout: Layout,
+    data: bytes,
+    *,
+    relpath: str | None = None,
+    cycle_id: int = 1,
+) -> Step:
     """Write one allowlisted file in the worktree. The source checkout is not touched."""
     rel = layout.relpath if relpath is None else relpath
+    raw = worktree_dir(layout) / rel
+    if raw.is_symlink():
+        return Step(False, "symlink-refused")
     dest = _allow_file(layout, rel)
     if dest is None:
         return Step(False, "path-not-allowlisted")
     if not dest.is_file():
         return Step(False, "path-not-allowlisted")
     preimage = dest.read_bytes()
-    arm_pending(layout, preimage, phase="armed")
+    arm_pending(layout, preimage, cycle_id=cycle_id, phase="armed")
     atomic_write_bytes(dest, data)
     pending = json.loads((layout.run_dir / "pending.json").read_text(encoding="utf-8"))
     pending["phase"] = "applied"
@@ -323,12 +355,22 @@ def guard_allowlist(layout: Layout) -> Step:
         return Step(True)
     pending = _pending(layout)
     preimage = None if pending is None else _preimage_bytes(layout, pending)
+    pre_sha = None if preimage is None else sha256_bytes(preimage)
+    proposal_id = None
+    if pending is not None and isinstance(pending.get("proposal_id"), str):
+        proposal_id = pending["proposal_id"]
     if preimage is not None:
         restore_base(layout, preimage)
     rows = load_audit(layout.run_dir / "audit.jsonl")
     if not _closed(rows):
         base = read_base(layout)
-        _append_broken(layout, "path-not-allowlisted", None if base is None else base.get("git_sha"))
+        _append_broken(
+            layout,
+            "path-not-allowlisted",
+            None if base is None else base.get("git_sha"),
+            preimage_sha256=pre_sha,
+            proposal_id=proposal_id,
+        )
         pending_path = layout.run_dir / "pending.json"
         if pending_path.exists():
             pending_path.unlink()

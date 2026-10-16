@@ -12,6 +12,28 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from harness.audit import load_audit
+from harness.repo_audit import AUDIT_SCHEMA as AUDIT_SCHEMA_V2
+
+
+def _schema_family(record: dict) -> str:
+    if record.get("schema") == AUDIT_SCHEMA_V2:
+        return "v2"
+    return "v1"
+
+
+def _mixed_schema(records: list[dict]) -> bool:
+    return {_schema_family(rec) for rec in records} == {"v1", "v2"}
+
+
+def _all_v2(records: list[dict]) -> bool:
+    return bool(records) and all(_schema_family(rec) == "v2" for rec in records)
+
+
+def _oracle_name(record: dict) -> str:
+    oracle = record.get("oracle")
+    if isinstance(oracle, dict) and isinstance(oracle.get("name"), str):
+        return oracle["name"]
+    return str(record.get("reason") or "")
 
 
 def summarize_audit(
@@ -22,6 +44,8 @@ def summarize_audit(
     proposal_prefix: str | None = None,
 ) -> dict:
     records = load_audit(path)
+    if _mixed_schema(records):
+        return {"error": "mixed-schema", "total": len(records)}
     selected = []
     for rec in records:
         if decision and rec.get("decision") != decision:
@@ -164,6 +188,41 @@ def _fixture_block(record: dict) -> dict:
     return {}
 
 
+def _render_v2_report(
+    records: list[dict],
+    *,
+    run_id: str,
+    mode: str,
+    wall_ms: int,
+) -> str:
+    """Decision counts for a repo audit. No fixture curve."""
+    counts: dict[str, int] = {}
+    for rec in records:
+        key = str(rec.get("decision") or "")
+        counts[key] = counts.get(key, 0) + 1
+    names = [_oracle_name(rec) for rec in records if rec.get("decision") == "KEEP"]
+    oracle = ", ".join(names) if names else _oracle_name(records[-1])
+    lines = [
+        f"# aura-maintainer report {run_id}",
+        "",
+        f"- mode: {mode}",
+        f"- cycles: {len(records)}",
+        f"- wall_ms: {wall_ms}",
+        f"- oracle: {oracle}",
+        "",
+        "## Counts",
+        "",
+        f"- KEEP: {counts.get('KEEP', 0)}",
+        f"- ROLLBACK: {counts.get('ROLLBACK', 0)}",
+        f"- IDLE: {counts.get('IDLE', 0)}",
+        f"- PATH_BROKEN: {counts.get('PATH_BROKEN', 0)}",
+        "",
+        "This report counts decisions.",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def render_report(
     records: list[dict],
     *,
@@ -174,6 +233,8 @@ def render_report(
     tree_note: str = "not recorded",
 ) -> str:
     """Demo report. Counts come only from the audit."""
+    if _all_v2(records):
+        return _render_v2_report(records, run_id=run_id, mode=mode, wall_ms=wall_ms)
     counts: dict[str, int] = {}
     for rec in records:
         key = str(rec.get("decision") or "")
@@ -307,6 +368,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     json.dump(report, sys.stdout, indent=2, sort_keys=True)
     sys.stdout.write("\n")
+    if report.get("error") == "mixed-schema":
+        return 2
     if args.report is not None:
         records = load_audit(args.audit)
         dest = args.audit.parent / "report.md" if args.report == "" else Path(args.report)

@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 import unittest
+from io import StringIO
 from pathlib import Path
+from unittest import mock
 
-from harness.metrics import champion_curve, main, render_report
+from harness.metrics import champion_curve, main, render_report, summarize_audit
+from harness.repo_audit import idle_record, keep_record
 
 
 def _keep() -> dict:
@@ -106,6 +110,62 @@ class CurveTests(unittest.TestCase):
             rc = main([str(audit), "--report", str(dest), "--decision", "KEEP"])
             self.assertEqual(rc, 0)
             self.assertIn("param:min-ops:120->80", dest.read_text(encoding="utf-8"))
+        finally:
+            tmp.cleanup()
+
+    def test_mixed_schema_returns_2(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            audit = Path(tmp.name) / "audit.jsonl"
+            rows = [
+                _keep(),
+                idle_record(run_id="r", cycle_id=2, base_git_sha="abc"),
+            ]
+            audit.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+            report = summarize_audit(audit)
+            self.assertEqual(report, {"error": "mixed-schema", "total": 2})
+            self.assertNotIn("keeps", report)
+            dest = Path(tmp.name) / "out.md"
+            buf = StringIO()
+            old = sys.stdout
+            sys.stdout = buf
+            try:
+                rc = main([str(audit), "--report", str(dest)])
+            finally:
+                sys.stdout = old
+            self.assertEqual(rc, 2)
+            self.assertIn("mixed-schema", buf.getvalue())
+            self.assertFalse(dest.exists())
+        finally:
+            tmp.cleanup()
+
+    def test_v2_report_counts_decisions(self) -> None:
+        kept = keep_record(
+            run_id="r",
+            cycle_id=1,
+            base_git_sha="abc",
+            path="src/redis/policy/choose_normal.aura",
+            preimage_sha256="aa",
+            after_sha256="bb",
+            body_sha256="cc",
+            patch="patches/1.patch",
+            issue={"id": "comment-drift:choose_normal:erate-50"},
+            oracle={"name": "oracle:comment-drift:erate-50"},
+            reason="comment-drift cleared; body unchanged",
+            human_tree_clean=True,
+        )
+        with mock.patch("harness.metrics.champion_curve", side_effect=AssertionError("curve")):
+            text = render_report([kept], run_id="r", mode="repo")
+        self.assertIn("oracle:comment-drift:erate-50", text)
+        self.assertNotIn("fixture_score", text)
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            audit = Path(tmp.name) / "audit.jsonl"
+            audit.write_text(json.dumps(kept) + "\n", encoding="utf-8")
+            report = summarize_audit(audit)
+            self.assertNotIn("error", report)
+            self.assertEqual(report["counts"]["KEEP"], 1)
+            self.assertIsInstance(report, dict)
         finally:
             tmp.cleanup()
 
