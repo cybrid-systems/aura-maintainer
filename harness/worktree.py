@@ -427,8 +427,12 @@ def _write_materialized(layout: Layout, cycle_id: int) -> None:
         pending.unlink()
 
 
-def materialize(layout: Layout, record: dict) -> Step:
-    """Commit after a fsynced KEEP, or only mark an existing matching commit."""
+def materialize(layout: Layout, record: dict, *, after_commit=None) -> Step:
+    """Commit after a fsynced KEEP, or only mark an existing matching commit.
+
+    after_commit runs only after a new commit succeeds and before the marker.
+    The already-materialized path does not call it.
+    """
     base_sha = str(record.get("base_git_sha") or "")
     after_sha = str(record.get("after_sha256") or "")
     cycle_id = int(record.get("cycle_id") or 1)
@@ -458,6 +462,8 @@ def materialize(layout: Layout, record: dict) -> Step:
         return Step(False, "materialize-failed")
     if not already_materialized(layout, base_sha=base_sha, after_sha256=after_sha):
         return Step(False, "materialize-failed")
+    if after_commit is not None:
+        after_commit()
     _write_materialized(layout, cycle_id)
     return Step(True)
 

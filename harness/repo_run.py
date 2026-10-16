@@ -84,6 +84,12 @@ class _Cycle:
     materialize_failed: bool = False
 
 
+def _crash_at(point: str) -> None:
+    """Test hook. Unset AM_REPO_CRASH leaves the run alone."""
+    if os.environ.get("AM_REPO_CRASH") == point:
+        os._exit(99)
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as fh:
@@ -344,6 +350,7 @@ def _one_cycle(layout: Layout, args, registry: tuple, rows: list[dict], beat: He
         early = reason in _IMMEDIATE or _streak(fresh) >= STREAK_LIMIT
         return _Cycle(fresh, stopped_early=early)
     beat.write(layout.run_dir, "apply", cycle_id, os.getpid())
+    _crash_at("after-apply")
     try:
         live = dest.read_bytes()
         live_text = live.decode("utf-8")
@@ -489,7 +496,10 @@ def _one_cycle(layout: Layout, args, registry: tuple, rows: list[dict], beat: He
     )
     fresh = _commit_row(layout, record, remember=(cls.proposal_id, preimage_sha))
     beat.write(layout.run_dir, "recorded", cycle_id, os.getpid())
-    materialized = materialize(layout, record)
+    _crash_at("after-audit")
+    materialized = materialize(
+        layout, record, after_commit=lambda: _crash_at("after-commit"),
+    )
     if not materialized.ok:
         return _Cycle(fresh, materialize_failed=True)
     return _Cycle(fresh)
