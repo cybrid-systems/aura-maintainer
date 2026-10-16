@@ -60,3 +60,5 @@ closed-catalog proposal, and keeps it only when the fixture score rises.
 `--dry-run` rolls the proposal back without rebinding it. `--proposer llm`
 is optional and off by default. Soak (`--hours` with `--cycles 0`) is off
 unless you ask for it.
+
+Repository mode is `--mode repo`. Its spec is `docs/design-repo.md`. The default mode is still hold.
