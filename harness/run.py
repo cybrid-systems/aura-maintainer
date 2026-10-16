@@ -823,7 +823,7 @@ def idle_wait(run_dir: Path, beats: Heartbeat, deadline: float, cycle_id: int) -
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Run the aura-maintainer outer loop")
-    ap.add_argument("--mode", choices=("hold", "recover"), default="hold")
+    ap.add_argument("--mode", choices=("hold", "recover", "repo"), default="hold")
     ap.add_argument("--cycles", type=int, default=None, help="Aura process cap. 0 means no cap")
     ap.add_argument("--hours", type=float, default=None, help="Wall clock cap. Must be <= 72")
     ap.add_argument("--aura-bin", default=None)
@@ -831,7 +831,14 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     ap.add_argument("--run-id", default=None, help="Run id to create. Default is a UTC timestamp")
     ap.add_argument("--timeout-sec", type=float, default=20)
     ap.add_argument("--reports-dir", type=Path, default=DEFAULT_REPORTS)
-    ap.add_argument("--dry-run", action="store_true", help="Seed and locate, do not rebind the proposal")
+    ap.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "hold/recover: seed and locate, do not rebind the proposal. "
+            "repo: check the comment oracle in memory and do not write the worktree file"
+        ),
+    )
     ap.add_argument("--proposer", choices=("rules", "llm"), default="rules")
     ap.add_argument("--health-every", type=float, default=1800, help="Seconds between soak health probes. 0 runs one on every idle slot")
     ap.add_argument("--llm-key", type=Path, default=None, help="Override ~/code/keys/minimax")
@@ -877,22 +884,64 @@ def _finish_cycle(
     return written, streak, stopped
 
 
+def saved_mode(run_dir: Path) -> str | None:
+    """Mode recorded in environ.json, or None when the file is missing or unreadable."""
+    path = run_dir / "environ.json"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    mode = data.get("mode") if isinstance(data, dict) else None
+    return mode if isinstance(mode, str) else None
+
+
+def modes_conflict(saved: str | None, requested: str) -> bool:
+    """True when one side is repo and the two modes are not the same."""
+    if saved == requested:
+        return False
+    return saved == "repo" or requested == "repo"
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if args.hours is not None and args.hours > 72:
         print("error: --hours must be <= 72", file=sys.stderr)
         return 2
-    if args.cycles is None:
+    if args.mode == "repo" and args.proposer == "llm":
+        print("error: --proposer llm is not available in --mode repo", file=sys.stderr)
+        return 2
+    if args.mode == "repo":
+        if args.cycles is None:
+            args.cycles = 2
+    elif args.cycles is None:
         args.cycles = 24 if args.mode == "recover" else 8
     if args.cycles < 0:
         print("error: --cycles must be >= 0", file=sys.stderr)
         return 2
-    if args.cycles == 0 and args.hours is None:
+    if args.mode == "repo" and args.cycles == 0:
+        print("error: --mode repo does not accept --cycles 0", file=sys.stderr)
+        return 2
+    if args.mode != "repo" and args.cycles == 0 and args.hours is None:
         print("error: --cycles 0 requires --hours", file=sys.stderr)
         return 2
     if args.timeout_sec <= 0:
         print("error: --timeout-sec must be > 0", file=sys.stderr)
         return 2
+
+    if args.resume:
+        resume_dir = args.reports_dir / args.resume
+        if args.mode == "repo" and not resume_dir.is_dir():
+            print(f"error: resume directory not found: {resume_dir}", file=sys.stderr)
+            return 2
+        if resume_dir.is_dir() and modes_conflict(saved_mode(resume_dir), args.mode):
+            print("mode-mismatch", file=sys.stderr)
+            return 2
+
+    if args.mode == "repo":
+        from harness.repo_run import main as repo_main
+        return repo_main(args)
 
     aura = args.aura_bin or find_aura_bin()
     if not aura or not Path(aura).is_file():
