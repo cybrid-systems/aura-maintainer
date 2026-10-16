@@ -12,6 +12,7 @@ from harness.catalog import (
     Catalog,
     load_catalog,
 )
+from harness.repo_catalog import comment_drift_erate50
 
 
 def _issue(
@@ -105,7 +106,7 @@ def discover(root: Path | None = None, catalog: Catalog | None = None) -> list[d
             propose=False,
         ))
 
-    if "noop|flat" in normal_src and "noop|flat" not in catalog.normal and "(>= erate 50)" not in catalog.normal:
+    if comment_drift_erate50(normal_src, catalog.normal):
         issues.append(_issue(
             "comment-drift:choose_normal:erate-50",
             "drift",
